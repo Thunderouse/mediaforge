@@ -5,10 +5,11 @@ from __future__ import annotations
 import threading
 from pathlib import Path
 
-from PySide6.QtCore import (QPointF, QRectF, QSize, Qt, QTimer, Signal, QObject)
+from PySide6.QtCore import (QPointF, QRectF, QRegularExpression, QSize, Qt,
+                            QTimer, Signal, QObject)
 from PySide6.QtGui import (QColor, QIcon, QLinearGradient,
-                           QPainter, QPainterPath, QPixmap, QShortcut,
-                           QKeySequence)
+                           QPainter, QPainterPath, QPixmap,
+                           QRegularExpressionValidator, QShortcut, QKeySequence)
 from PySide6.QtWidgets import (QApplication, QComboBox, QFileDialog,
                                QFrame, QGridLayout, QHBoxLayout, QLabel,
                                QLineEdit, QMainWindow, QMessageBox, QPushButton,
@@ -21,6 +22,7 @@ from ..core.engine import (STATUS_CANCELLED, STATUS_DONE, STATUS_ERROR,
 from ..core.ffmpeg import (AUDIO_EXT, IMAGE_EXT, VIDEO_EXT,
                            MediaInfo, Tools, guess_kind, human_size,
                            iter_media_files, probe)
+from ..core.timecode import format_timecode, parse_timecode
 from . import icons, theme
 from .widgets import (CheckBox, Combo, DropZone, IconButton, JobRow,
                       ProgressLine, Segmented)
@@ -328,6 +330,34 @@ class MainWindow(QMainWindow):
             lambda: self._set_opt("resolution", self.cmb_resolution.currentData()))
         lay.addWidget(self.cmb_resolution)
 
+        # --- фрагмент ---
+        self.trim_box = QWidget()
+        tl = QVBoxLayout(self.trim_box)
+        tl.setContentsMargins(0, 4, 0, 0)
+        tl.setSpacing(6)
+        tl.addWidget(self._divider())
+        self.trim_title = self._section("Фрагмент · весь файл")
+        tl.addWidget(self.trim_title)
+        trim_row = QHBoxLayout()
+        trim_row.setSpacing(8)
+        pattern = QRegularExpression(r"^[0-9]{0,3}([:.,][0-9]{0,3}){0,3}$")
+        # NB: не называть переменную side — это имя виджета-сайдбара выше
+        for caption, layout_attr, value in (("С начала", "edit_trim_start", opts.trim_start),
+                                           ("По", "edit_trim_end", opts.trim_end)):
+            col = QVBoxLayout()
+            col.setSpacing(4)
+            col.addWidget(self._field_label(caption))
+            edit = QLineEdit(format_timecode(value) if value else "")
+            edit.setValidator(QRegularExpressionValidator(pattern, edit))
+            edit.setPlaceholderText("0:00" if caption == "С начала" else "конец")
+            edit.setClearButtonEnabled(True)
+            edit.textChanged.connect(self._on_trim_edited)
+            col.addWidget(edit)
+            trim_row.addLayout(col, 1)
+            setattr(self, layout_attr, edit)
+        tl.addLayout(trim_row)
+        lay.addWidget(self.trim_box)
+
         # --- блок GIF ---
         self.gif_box = QWidget()
         gl = QVBoxLayout(self.gif_box)
@@ -602,6 +632,8 @@ class MainWindow(QMainWindow):
                 pass
             job = Job(src=f, info=info, target=fm.BY_KEY[target_key])
             row = JobRow(job, self)
+            row.set_trim(float(self.settings.get("opt_trim_start", 0.0) or 0.0),
+                         float(self.settings.get("opt_trim_end", 0.0) or 0.0))
             row.targetChanged.connect(self._on_row_target)
             row.removeRequested.connect(self._remove_row)
             self.list_lay.insertWidget(self.list_lay.count() - 1, row)
@@ -704,6 +736,8 @@ class MainWindow(QMainWindow):
         self._update_summary()
 
     def _update_option_visibility(self) -> None:
+        has_media = any(j.info.kind in ("video", "audio") for j in self.jobs)
+        self.trim_box.setVisible(has_media)
         has_gif = any(j.target.key.startswith("gif") for j in self.jobs)
         has_audio = any(j.target.kind == fm.KIND_AUDIO for j in self.jobs)
         self.gif_box.setVisible(has_gif)
@@ -758,6 +792,41 @@ class MainWindow(QMainWindow):
         if not checked and not self.edit_out.text():
             self._pick_out_dir()
 
+    def _read_trim(self) -> tuple[float, float]:
+        """Разбирает поля фрагмента; ValueError — если время введено некорректно."""
+        start = parse_timecode(self.edit_trim_start.text()) or 0.0
+        end = parse_timecode(self.edit_trim_end.text()) or 0.0
+        if end and end <= start:
+            raise ValueError("Конец фрагмента должен быть больше начала")
+        return start, end
+
+    def _on_trim_edited(self, _text: str = "") -> None:
+        ok = True
+        try:
+            start, end = self._read_trim()
+        except ValueError:
+            ok = False
+            start = end = 0.0
+        style = "" if ok else f"border-color: {theme.current()['danger']};"
+        for edit in (self.edit_trim_start, self.edit_trim_end):
+            edit.setStyleSheet(style)
+        if not ok:
+            self.trim_title.setText("Фрагмент · проверьте время")
+            self.trim_title.setStyleSheet(f"color: {theme.current()['danger']};")
+            return
+        if not start and not end:
+            self.trim_title.setText("Фрагмент · весь файл")
+        else:
+            tail = f"по {format_timecode(end)}" if end else "до конца"
+            length = f" · {end - start:.1f} с" if end else ""
+            self.trim_title.setText(
+                f"Фрагмент · {format_timecode(start)} {tail}{length}")
+        self.trim_title.setStyleSheet(f"color: {theme.current()['muted']}; font-size: 11px; font-weight: 600;")
+        self.settings.set("opt_trim_start", start)
+        self.settings.set("opt_trim_end", end)
+        for row in self.rows.values():
+            row.set_trim(start, end)
+
     def _pick_out_dir(self) -> None:
         start = self.edit_out.text() or str(Path.home())
         path = QFileDialog.getExistingDirectory(self, "Папка для результатов", start)
@@ -787,6 +856,12 @@ class MainWindow(QMainWindow):
             self._flash("ffmpeg не найден — конвертация недоступна")
             return
         if self._is_busy() or not self.jobs:
+            return
+        try:
+            self._read_trim()
+        except ValueError as exc:
+            self._flash(str(exc))
+            QMessageBox.warning(self, APP_NAME, str(exc))
             return
         opts = self.settings.options()
         use_source = self.chk_source_dir.isChecked()

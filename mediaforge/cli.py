@@ -14,6 +14,7 @@ from .core import formats as fm
 from .core.convert import ConvertError, convert_file
 from .core.ffmpeg import (FFmpegNotFound, Tools, iter_media_files,
                           probe)
+from .core.timecode import parse_timecode
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -35,6 +36,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-loop", action="store_true", help="GIF без зацикливания")
     p.add_argument("--bitrate", default="192k", help="Битрейт аудио (mp3/aac/opus)")
     p.add_argument("--overwrite", action="store_true", help="Перезаписывать файлы")
+    p.add_argument("--start", default="", help="Начало фрагмента: 1:30 или секунды")
+    p.add_argument("--end", default="", help="Конец фрагмента (по умолчанию до конца)")
     p.add_argument("--gpu", action="store_true", help="Аппаратное кодирование")
     p.add_argument("--gentle", action="store_true", help="Меньше нагрузки на CPU")
     return p
@@ -56,11 +59,19 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Ошибка: неизвестный формат '{args.to}'", file=sys.stderr)
         return 2
 
+    try:
+        trim_start = parse_timecode(args.start) or 0.0
+        trim_end = parse_timecode(args.end) or 0.0
+    except ValueError as exc:
+        print(f"Ошибка: {exc}", file=sys.stderr)
+        return 2
+
     opts = fm.ConvertOptions(
         quality=args.quality, resolution=args.resolution, gif_fps=args.fps,
         gif_width=args.width, gif_loop=not args.no_loop,
         audio_bitrate=args.bitrate, overwrite=args.overwrite,
         gpu=args.gpu, gentle=args.gentle,
+        trim_start=trim_start, trim_end=trim_end,
     )
     out_dir = Path(args.out).expanduser().resolve()
     out_dir.mkdir(parents=True, exist_ok=True)

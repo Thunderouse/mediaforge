@@ -15,6 +15,7 @@ from ..core import formats as fm
 from ..core.engine import (STATUS_CANCELLED, STATUS_DONE, STATUS_ERROR,
                            STATUS_RUNNING, Job)
 from ..core.ffmpeg import human_size
+from ..core.timecode import format_timecode
 from . import icons, theme
 
 
@@ -293,6 +294,7 @@ class JobRow(QFrame):
         self.setFixedHeight(78)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self._hover = False
+        self._trim: tuple[float, float] = (0.0, 0.0)
         self.setAttribute(Qt.WA_Hover, True)
 
         lay = QHBoxLayout(self)
@@ -352,6 +354,10 @@ class JobRow(QFrame):
             self.combo.blockSignals(True)
             self.combo.setCurrentIndex(self._keys.index(key))
             self.combo.blockSignals(False)
+
+    def set_trim(self, start: float, end: float) -> None:
+        self._trim = (start or 0.0, end or 0.0)
+        self.update_state()
 
     def set_info(self, info) -> None:
         """Обновляет тип файла после ffprobe: пересобирает список форматов."""
@@ -439,6 +445,10 @@ class JobRow(QFrame):
             self.meta.setStyleSheet(f"color: {p['accent']}; font-size: 11px;")
         else:
             self.meta.setStyleSheet(f"color: {p['dim']}; font-size: 11px;")
+        start, end = self._trim
+        if (start or end) and self.job.info.kind in ("video", "audio"):
+            tail = format_timecode(end) if end else "конец"
+            parts.insert(0, f"✂ {format_timecode(start)}–{tail}")
         self.meta.setText("   ·   ".join(x for x in parts if x))
         self.combo.setEnabled(job.status != STATUS_RUNNING)
         self.update()

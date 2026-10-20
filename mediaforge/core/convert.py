@@ -11,6 +11,7 @@ from typing import Callable
 from . import formats as fm
 from .ffmpeg import (Cancelled, ConvertError, MediaInfo, Tools, guess_kind, probe,
                      run_ffmpeg)
+from .timecode import format_timecode
 
 ProgressCB = Callable[[float, str], None]
 
@@ -71,6 +72,37 @@ def _hw_encoder(tools: Tools) -> str | None:
     return tools.detect_hardware()
 
 
+def trim_plan(info: MediaInfo, opts: fm.ConvertOptions) -> tuple[list[str], list[str], float]:
+    """Аргументы ffmpeg для вырезания фрагмента и его длительность.
+
+    `-ss` ставится до `-i` (быстрый seek), `-t` — после (длительность вырезки).
+    Возвращает ([], [], duration) если фрагмент не задан.
+    """
+    start = max(0.0, float(opts.trim_start or 0.0))
+    end = float(opts.trim_end or 0.0)
+    total = info.duration or 0.0
+
+    if start and total and start >= total:
+        raise ConvertError(
+            f"Начало фрагмента ({format_timecode(start)}) за пределами файла "
+            f"({format_timecode(total)})"
+        )
+    if end and total and end > total:
+        end = total
+    if end and end <= start:
+        raise ConvertError("Конец фрагмента должен быть больше его начала")
+    if not start and not end:
+        return [], [], total
+
+    pre = ["-ss", f"{start:.3f}"] if start else []
+    if end:
+        duration = end - start
+    else:
+        duration = max(0.0, total - start) if total else 0.0
+    post = ["-t", f"{duration:.3f}"] if duration > 0 else []
+    return pre, post, duration or total
+
+
 # --------------------------------------------------------------------------- #
 # Видео / аудио / GIF: аргументы ffmpeg
 # --------------------------------------------------------------------------- #
@@ -83,9 +115,10 @@ def build_video_cmd(
     """Возвращает (argv, примечание)."""
     note = ""
     vf = _scale_video(info, opts)
+    trim_pre, trim_post, _ = trim_plan(info, opts)
     cmd = [
         tools.ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
-        "-progress", "pipe:1", "-i", str(src),
+        "-progress", "pipe:1", *trim_pre, "-i", str(src), *trim_post,
     ]
     audio_out: list[str] = []
     video_out: list[str] = []
@@ -169,9 +202,10 @@ def build_gif_cmd(
     chain.append("split[s0][s1];[s0]palettegen=max_colors=256:stats_mode=diff[p];"
                  "[s1][p]paletteuse=dither=sierra2_4a:diff_mode=rectangle")
     vf = ",".join(chain)
+    trim_pre, trim_post, _ = trim_plan(info, opts)
     return [
         tools.ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
-        "-progress", "pipe:1", "-i", str(src),
+        "-progress", "pipe:1", *trim_pre, "-i", str(src), *trim_post,
         "-an", "-sn", "-vf", vf, "-loop", "0" if opts.gif_loop else "-1",
         *_threads(opts.gentle), str(dst),
     ]
@@ -196,9 +230,10 @@ def build_audio_cmd(
         args += ["-ar", "48000", "-ac", "2"]
     if target.key == "m4a":
         args += ["-movflags", "+faststart"]
+    trim_pre, trim_post, _ = trim_plan(info, opts)
     return [
         tools.ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
-        "-progress", "pipe:1", "-i", str(src),
+        "-progress", "pipe:1", *trim_pre, "-i", str(src), *trim_post,
         *args, *_meta(opts), *_threads(opts.gentle), str(dst),
     ]
 
@@ -331,6 +366,8 @@ def convert_file(
         info = MediaInfo(path=src, kind=guess_kind(src)) if tools is None else probe(src, tools)
     if info.kind == "unknown":
         raise ConvertError("Неизвестный тип файла")
+    # проверяем границы фрагмента до создания файлов
+    _, _, effective_duration = trim_plan(info, opts)
     note = ""
 
     is_image_path = target.kind == fm.KIND_IMAGE or target.key == "gif_img" or (
@@ -357,19 +394,19 @@ def convert_file(
             if tools is None:
                 raise ConvertError("Для видео нужен ffmpeg")
             cmd = build_gif_cmd(src, dst, info, opts, tools)
-            run_ffmpeg(cmd, info.duration, on_progress, cancel)
+            run_ffmpeg(cmd, effective_duration, on_progress, cancel)
         elif target.kind == fm.KIND_AUDIO:
             if tools is None:
                 raise ConvertError("Для извлечения звука нужен ffmpeg")
             cmd = build_audio_cmd(src, dst, info, target, opts, tools)
-            run_ffmpeg(cmd, info.duration, on_progress, cancel)
+            run_ffmpeg(cmd, effective_duration, on_progress, cancel)
         else:
             if info.kind == "audio":
                 raise ConvertError("Это аудиофайл — выберите аудиоформат")
             if tools is None:
                 raise ConvertError("Для конвертации видео нужен ffmpeg")
             cmd, note = build_video_cmd(src, dst, info, target, opts, tools)
-            run_ffmpeg(cmd, info.duration, on_progress, cancel)
+            run_ffmpeg(cmd, effective_duration, on_progress, cancel)
     except BaseException:
         _cleanup(dst)
         raise

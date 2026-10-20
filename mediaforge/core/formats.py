@@ -119,6 +119,12 @@ class ConvertOptions:
     gpu: bool = False
     gentle: bool = False  # щадящий режим: меньше потоков
     overwrite: bool = False
+    trim_start: float = 0.0   # секунды от начала; 0 — с начала
+    trim_end: float = 0.0     # секунды; 0 — до конца файла
 
     def copy(self, **changes) -> "ConvertOptions":
         return replace(self, **changes)
+
+    @property
+    def has_trim(self) -> bool:
+        return self.trim_start > 0 or self.trim_end > 0

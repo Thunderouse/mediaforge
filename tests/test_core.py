@@ -14,8 +14,10 @@ import pytest
 
 from mediaforge.core import formats as fm
 from mediaforge.core.convert import (ConvertError, build_audio_cmd, build_gif_cmd,
-                                     convert_file, unique_path)
-from mediaforge.core.ffmpeg import (Tools, human_duration, human_size,
+                                     build_video_cmd, convert_file, trim_plan,
+                                     unique_path)
+from mediaforge.core.timecode import format_timecode, parse_timecode
+from mediaforge.core.ffmpeg import (MediaInfo, Tools, human_duration, human_size,
                                    iter_media_files, probe)
 
 FFMPEG = shutil.which("ffmpeg")
@@ -238,3 +240,92 @@ def test_gentle_mode_limits_threads(tools, media):
     cmd = build_audio_cmd(media["clip"], Path("o.mp3"), info, fm.BY_KEY["mp3"],
                           fm.ConvertOptions(gentle=True), tools)
     assert "-threads" in cmd
+
+
+# --------------------------------------------------------------------------- #
+# Таймкоды и вырезание фрагмента
+# --------------------------------------------------------------------------- #
+def test_parse_timecode_formats():
+    assert parse_timecode("0") == 0.0
+    assert parse_timecode("") is None
+    assert parse_timecode("   ") is None
+    assert parse_timecode(None) is None
+    assert parse_timecode("90") == 90.0
+    assert parse_timecode("1:30") == 90.0
+    assert parse_timecode("00:01:30") == 90.0
+    assert parse_timecode("1:30.5") == 90.5
+    assert parse_timecode("1:30,25") == 90.25
+    assert parse_timecode("0:00:01.250") == 1.25
+
+
+def test_parse_timecode_rejects_garbage():
+    for bad in ("abc", "1:75", "1:2:3:4", "-5"):
+        with pytest.raises(ValueError):
+            parse_timecode(bad)
+
+
+def test_format_timecode():
+    assert format_timecode(0) == "0:00"
+    assert format_timecode(90.5) == "1:30.5"
+    assert format_timecode(3675) == "1:01:15"
+    assert format_timecode(-1) == ""
+
+
+@needs_ffmpeg
+def test_trim_plan_fragment(tools, media):
+    info = probe(media["clip"], tools)
+    opts = fm.ConvertOptions(trim_start=0.5, trim_end=1.5)
+    pre, post, duration = trim_plan(info, opts)
+    assert pre == ["-ss", "0.500"]
+    assert post == ["-t", "1.000"]
+    assert duration == pytest.approx(1.0)
+
+
+def test_trim_plan_without_fragment(media):
+    info = MediaInfo(path=Path("x.mp4"), kind="video", duration=10.0)
+    assert trim_plan(info, fm.ConvertOptions()) == ([], [], 10.0)
+
+
+def test_trim_plan_validation():
+    info = MediaInfo(path=Path("x.mp4"), kind="video", duration=10.0)
+    with pytest.raises(ConvertError):
+        trim_plan(info, fm.ConvertOptions(trim_start=5, trim_end=5))
+    with pytest.raises(ConvertError):
+        trim_plan(info, fm.ConvertOptions(trim_start=20))
+    # конец за пределами файла аккуратно подрезается
+    _, post, duration = trim_plan(info, fm.ConvertOptions(trim_start=8, trim_end=99))
+    assert post == ["-t", "2.000"]
+    assert duration == pytest.approx(2.0)
+
+
+@needs_ffmpeg
+def test_video_trim_actually_cuts(tools, media, tmp_path):
+    opts = fm.ConvertOptions(trim_start=0.5, trim_end=1.5)
+    res = convert_file(media["clip"], fm.BY_KEY["mp4"], opts, tools, tmp_path)
+    info = probe(res.output, tools)
+    assert info.duration == pytest.approx(1.0, abs=0.25)
+
+
+@needs_ffmpeg
+def test_gif_and_audio_trim(tools, media, tmp_path):
+    opts = fm.ConvertOptions(trim_start=0.2, trim_end=1.2, gif_fps="10", gif_width="160")
+    gif = convert_file(media["clip"], fm.BY_KEY["gif"], opts, tools, tmp_path)
+    assert probe(gif.output, tools).duration == pytest.approx(1.0, abs=0.3)
+    mp3 = convert_file(media["clip"], fm.BY_KEY["mp3"], opts, tools, tmp_path)
+    assert probe(mp3.output, tools).duration == pytest.approx(1.0, abs=0.3)
+
+
+def test_trim_args_in_commands(tools, media):
+    if "clip" not in media:
+        pytest.skip("нет тестового видео")
+    info = probe(media["clip"], tools)
+    opts = fm.ConvertOptions(trim_start=1.0, trim_end=2.0)
+    for cmd in (
+        build_gif_cmd(media["clip"], Path("o.gif"), info, opts, tools),
+        build_audio_cmd(media["clip"], Path("o.mp3"), info, fm.BY_KEY["mp3"], opts, tools),
+        build_video_cmd(media["clip"], Path("o.mp4"), info, fm.BY_KEY["mp4"], opts, tools)[0],
+    ):
+        joined = " ".join(cmd)
+        # -ss должен стоять до -i, -t — после
+        assert joined.index("-ss 1.000") < joined.index("-i ")
+        assert "-t 1.000" in joined
