@@ -1,6 +1,6 @@
 """Консольный интерфейс MediaForge — на случай автоматизации или headless-сервера.
 
-    python -m mediaforge.cli video.mp4 --to gif --fps 12 --width 640
+    python -m mediaforge.cli video.mp4 --to gif --fps 12 -r 480
     python -m mediaforge.cli *.png --to webp --quality small --out ./out
 """
 
@@ -30,9 +30,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("-q", "--quality", choices=[q for q, _ in fm.QUALITY_LABELS],
                    default="balanced", help="Качество (по умолчанию balanced)")
     p.add_argument("-r", "--resolution", default="original",
-                   help="2160/1440/1080/720/480 или original")
+                   help="2160/1440/1080/720/480 или original (видео, GIF, картинки)")
     p.add_argument("--fps", default="15", help="FPS для GIF")
-    p.add_argument("--width", default="720", help="Ширина GIF или original")
     p.add_argument("--no-loop", action="store_true", help="GIF без зацикливания")
     p.add_argument("--bitrate", default="192k", help="Битрейт аудио (mp3/aac/opus)")
     p.add_argument("--overwrite", action="store_true", help="Перезаписывать файлы")
@@ -68,7 +67,7 @@ def main(argv: list[str] | None = None) -> int:
 
     opts = fm.ConvertOptions(
         quality=args.quality, resolution=args.resolution, gif_fps=args.fps,
-        gif_width=args.width, gif_loop=not args.no_loop,
+        gif_loop=not args.no_loop,
         audio_bitrate=args.bitrate, overwrite=args.overwrite,
         gpu=args.gpu, gentle=args.gentle,
         trim_start=trim_start, trim_end=trim_end,

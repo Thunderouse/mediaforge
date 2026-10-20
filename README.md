@@ -48,7 +48,7 @@ libxcb-image0 libxcb-keysyms1 libxcb-render-util0 libxcb-shape0`.
 | Задача | Из чего | Во что |
 |---|---|---|
 | **Видео** | MP4, MKV, MOV, WebM, AVI, WMV, FLV, TS, M2TS, 3GP… | MP4 (H.264), MKV (H.265 / H.264), WebM (VP9), MOV, AVI |
-| **Видео → GIF** | любое видео | GIF с настройкой FPS, ширины и зацикливания |
+| **Видео → GIF** | любое видео | GIF с настройкой FPS, разрешения (общий список выше) и зацикливания |
 | **Звук из видео** | видео и аудио | MP3, M4A (AAC), WAV, FLAC, Opus, OGG |
 | **Картинки** | PNG, JPEG, WebP, AVIF, BMP, TIFF, GIF, ICO, HEIC… | PNG, JPEG, WebP, AVIF, TIFF, BMP, GIF, ICO, PDF |
 
@@ -116,7 +116,7 @@ libxcb-image0 libxcb-keysyms1 libxcb-render-util0 libxcb-shape0`.
 Для автоматизации есть консольный режим (из исходников):
 
 ```bash
-python -m mediaforge.cli video.mp4 --to gif --fps 12 --width 640
+python -m mediaforge.cli video.mp4 --to gif --fps 12 -r 480
 python -m mediaforge.cli photo.png --to avif --quality small --out ./out
 python -m mediaforge.cli movie.mkv --to mp3 --bitrate 320k
 python -m mediaforge.cli ./photos --to webp -r 1080 --gentle

@@ -97,13 +97,6 @@ RESOLUTIONS = (
 )
 
 GIF_FPS = ("10", "12", "15", "20", "25", "30")
-GIF_WIDTHS = (
-    ("original", "Оригинал"),
-    ("480", "480 px"),
-    ("640", "640 px"),
-    ("720", "720 px"),
-    ("1080", "1080 px"),
-)
 AUDIO_BITRATES = ("96k", "128k", "160k", "192k", "256k", "320k")
 
 
@@ -112,7 +105,6 @@ class ConvertOptions:
     quality: str = "balanced"
     resolution: str = "original"
     gif_fps: str = "15"
-    gif_width: str = "720"
     gif_loop: bool = True
     audio_bitrate: str = "192k"
     keep_metadata: bool = True

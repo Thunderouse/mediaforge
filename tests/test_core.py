@@ -177,7 +177,7 @@ def test_video_to_mp4_and_webm(tools, media, tmp_path):
 
 @needs_ffmpeg
 def test_video_to_gif_has_frames(tools, media, tmp_path):
-    opts = fm.ConvertOptions(gif_fps="10", gif_width="160")
+    opts = fm.ConvertOptions(gif_fps="10", resolution="120")
     res = convert_file(media["clip"], fm.BY_KEY["gif"], opts, tools, tmp_path)
     info = probe(res.output, tools)
     assert res.output.suffix == ".gif"
@@ -213,14 +213,28 @@ def test_cancel_stops_conversion(tools, media, tmp_path):
 # Сборка команд
 # --------------------------------------------------------------------------- #
 def test_gif_command_uses_two_pass_palette(tools, media):
-    info = probe(media["clip"], tools) if "clip" in media else None
-    if info is None:
+    if "clip" not in media:
         pytest.skip("нет тестового видео")
+    info = MediaInfo(path=media["clip"], kind="video", duration=2.0,
+                     width=1920, height=1080, has_video=True, has_audio=True)
     cmd = build_gif_cmd(media["clip"], Path("out.gif"), info,
-                        fm.ConvertOptions(gif_fps="12", gif_width="480"), tools)
+                        fm.ConvertOptions(gif_fps="12", resolution="480"), tools)
     joined = " ".join(cmd)
     assert "palettegen" in joined and "paletteuse" in joined
-    assert "fps=12" in joined and "scale=480" in joined
+    assert "fps=12" in joined
+    # масштаб GIF берётся из общего «Разрешения» — по высоте, с чётной шириной
+    assert "scale=-2:480" in joined
+    assert "scale=480:-1" not in joined
+
+
+def test_gif_does_not_upscale(tools, media):
+    if "clip" not in media:
+        pytest.skip("нет тестового видео")
+    info = MediaInfo(path=media["clip"], kind="video", duration=2.0,
+                     width=320, height=240, has_video=True)
+    cmd = build_gif_cmd(media["clip"], Path("out.gif"), info,
+                        fm.ConvertOptions(gif_fps="10", resolution="1080"), tools)
+    assert "scale=" not in " ".join(cmd)
 
 
 def test_audio_command_maps_only_audio(tools, media):
@@ -308,7 +322,7 @@ def test_video_trim_actually_cuts(tools, media, tmp_path):
 
 @needs_ffmpeg
 def test_gif_and_audio_trim(tools, media, tmp_path):
-    opts = fm.ConvertOptions(trim_start=0.2, trim_end=1.2, gif_fps="10", gif_width="160")
+    opts = fm.ConvertOptions(trim_start=0.2, trim_end=1.2, gif_fps="10")
     gif = convert_file(media["clip"], fm.BY_KEY["gif"], opts, tools, tmp_path)
     assert probe(gif.output, tools).duration == pytest.approx(1.0, abs=0.3)
     mp3 = convert_file(media["clip"], fm.BY_KEY["mp3"], opts, tools, tmp_path)

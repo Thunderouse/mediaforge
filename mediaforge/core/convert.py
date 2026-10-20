@@ -52,13 +52,23 @@ def _meta(opts: fm.ConvertOptions) -> list[str]:
     return ["-map_metadata", "0"] if opts.keep_metadata else ["-map_metadata", "-1"]
 
 
-def _scale_video(info: MediaInfo, opts: fm.ConvertOptions) -> list[str]:
+def _scale_chain(info: MediaInfo, opts: fm.ConvertOptions) -> list[str]:
+    """Фильтры масштабирования: разрешение — это ограничение по высоте.
+
+    Одно правило для видео и GIF: `-2` даёт чётную ширину (требование H.264
+    и большинства GIF-декодеров), апскейл не делаем.
+    """
     if opts.resolution == "original":
         return []
     target_h = int(opts.resolution)
     if info.height and info.height <= target_h:
         return []
-    return ["-vf", f"scale=-2:{target_h}:flags=lanczos"]
+    return [f"scale=-2:{target_h}:flags=lanczos"]
+
+
+def _scale_video(info: MediaInfo, opts: fm.ConvertOptions) -> list[str]:
+    chain = _scale_chain(info, opts)
+    return ["-vf", ",".join(chain)] if chain else []
 
 
 def _pick_encoder(tools: Tools, preferred: str, fallbacks: tuple[str, ...]) -> str | None:
@@ -196,9 +206,7 @@ def build_gif_cmd(
     src: Path, dst: Path, info: MediaInfo, opts: fm.ConvertOptions, tools: Tools,
 ) -> list[str]:
     fps = int(opts.gif_fps or 15)
-    chain = [f"fps={fps}"]
-    if opts.gif_width != "original":
-        chain.append(f"scale={int(opts.gif_width)}:-1:flags=lanczos")
+    chain = [f"fps={fps}", *_scale_chain(info, opts)]
     chain.append("split[s0][s1];[s0]palettegen=max_colors=256:stats_mode=diff[p];"
                  "[s1][p]paletteuse=dither=sierra2_4a:diff_mode=rectangle")
     vf = ",".join(chain)
