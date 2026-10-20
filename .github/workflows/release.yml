@@ -31,7 +31,10 @@ jobs:
         run: python tools/build_portable.py --stage build/pw --out out --cache build/cw
 
       - name: проверка Windows-сборки
-        run: python tools/check_portable.py build/pw/MediaForge-portable-win64
+        run: |
+          dir=$(ls -d build/pw/MediaForge-* | head -1)
+          echo "проверяю $dir"
+          python tools/check_portable.py "$dir"
 
       - name: Linux x86_64
         run: >-
