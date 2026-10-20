@@ -19,6 +19,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from peutil import prune_orphans  # noqa: E402
+from version import app_version  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 PY_VERSION = "3.11.9"
@@ -195,7 +196,8 @@ def ensure_wheels(cache: Path) -> list[Path]:
 
 
 def build(stage: Path, out: Path, keep_cache: Path) -> Path:
-    name = "MediaForge-portable-win64"
+    # версия в имени архива: MediaForge-1.3.0-portable-win64.zip
+    name = f"MediaForge-{app_version()}-portable-win64"
     target = stage / name
     if target.exists():
         shutil.rmtree(target)

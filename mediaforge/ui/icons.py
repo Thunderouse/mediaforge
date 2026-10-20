@@ -31,6 +31,7 @@ _PATHS = {
     "info": '<circle cx="12" cy="12" r="9"/><path d="M12 11v5.5M12 7.8v.4"/>',
     "spark": '<path d="M12 3l1.8 4.9L19 9.7l-5.2 1.8L12 16.4l-1.8-4.9L5 9.7l5.2-1.8z"/>',
     "chevron": '<path d="M7 10l5 5 5-5"/>',
+    "refresh": '<path d="M20.5 12a8.5 8.5 0 1 1-2.6-6.1M20.5 4.5V10h-5.5"/>',
     "play": '<path d="M8 5.5l11 6.5-11 6.5z"/>',
     "pause": '<path d="M9 5.5v13M15 5.5v13"/>',
 }

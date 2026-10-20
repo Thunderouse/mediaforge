@@ -17,6 +17,7 @@ from mediaforge.core.convert import (ConvertError, build_audio_cmd, build_gif_cm
                                      build_video_cmd, convert_file,
                                      target_image_size, trim_plan, unique_path)
 from mediaforge.core import preview as pv
+from mediaforge.core import updates
 from mediaforge.core.timecode import format_timecode, parse_timecode
 from mediaforge.core.ffmpeg import (MediaInfo, Tools, human_duration, human_size,
                                    iter_media_files, probe)
@@ -476,3 +477,42 @@ def test_image_explicit_size_with_nearest(tmp_path, media):
     res = convert_file(media["png"], fm.BY_KEY["png"], opts, None, tmp_path)
     with Image.open(res.output) as im:
         assert im.size == (64, 64)
+
+
+# --------------------------------------------------------------------------- #
+# Проверка обновлений
+# --------------------------------------------------------------------------- #
+def test_version_compare():
+    assert updates.parse_version("v1.2.0") == (1, 2, 0)
+    assert updates.parse_version("1.2.0-beta1") == (1, 2, 0)
+    assert updates.is_newer("1.3.0", "1.2.0")
+    assert updates.is_newer("1.10.0", "1.9.9")
+    assert not updates.is_newer("1.2.0", "1.2.0")
+    assert not updates.is_newer("1.1.9", "1.2.0")
+
+
+def _fake_release(tag: str, body: str = "заметки") -> dict:
+    return {"tag_name": tag, "html_url": f"https://example/{tag}", "body": body,
+            "published_at": "2026-10-20T00:00:00Z"}
+
+
+def test_check_latest_reports_newer_release():
+    release = updates.check_latest("1.2.0", fetcher=lambda repo: _fake_release("v1.3.0"))
+    assert release is not None
+    assert release.version == "1.3.0"
+    assert release.url.endswith("v1.3.0")
+    assert release.notes == "заметки"
+
+
+def test_check_latest_none_when_current():
+    assert updates.check_latest("1.3.0", fetcher=lambda repo: _fake_release("v1.3.0")) is None
+
+
+def test_check_latest_errors():
+    def broken(repo):
+        raise updates.UpdateError("нет сети")
+
+    with pytest.raises(updates.UpdateError):
+        updates.check_latest("1.0.0", fetcher=broken)
+    with pytest.raises(updates.UpdateError):
+        updates.check_latest("1.0.0", fetcher=lambda repo: {"html_url": "x"})

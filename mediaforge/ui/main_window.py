@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (QApplication, QComboBox, QFileDialog,
                                QVBoxLayout, QWidget)
 
 from ..core import formats as fm
+from ..core import updates
 from ..core.config import APP_NAME, APP_VERSION, Settings
 from ..core.engine import (STATUS_CANCELLED, STATUS_DONE, STATUS_ERROR,
                            STATUS_PENDING, STATUS_RUNNING, Engine, Job)
@@ -35,6 +36,7 @@ class Bridge(QObject):
 
     event = Signal(str, object)
     probed = Signal(str, object)
+    updateReady = Signal(str, object)
 
 
 def app_icon(size: int = 256) -> QIcon:
@@ -70,6 +72,7 @@ class MainWindow(QMainWindow):
         self.bridge = Bridge(self)
         self.bridge.event.connect(self._on_engine_event, Qt.QueuedConnection)
         self.bridge.probed.connect(self._on_probed, Qt.QueuedConnection)
+        self.bridge.updateReady.connect(self._on_update_ready, Qt.QueuedConnection)
         self._seen: set[Path] = set()
         self._ffmpeg_error = ffmpeg_error
 
@@ -175,6 +178,10 @@ class MainWindow(QMainWindow):
         ts.addWidget(self.btn_light)
         ts.addWidget(self.btn_dark)
         lay.addWidget(self.theme_switch)
+
+        self.btn_update = IconButton("refresh", "Проверить обновления на GitHub", 17, header)
+        self.btn_update.clicked.connect(self._check_updates)
+        lay.addWidget(self.btn_update)
 
         info = IconButton("info", "О программе и сочетания клавиш", 17, header)
         info.clicked.connect(self._show_about)
@@ -360,7 +367,7 @@ class MainWindow(QMainWindow):
         self.cmb_image_scale.addItem("Не менять", None)
         for percent in fm.IMAGE_PERCENTS:
             self.cmb_image_scale.addItem(f"{percent} %", percent)
-        self.cmb_image_scale.addItem("Свой размер…", "custom")
+        self.cmb_image_scale.addItem("Свой размер, px", "custom")
         current = (opts.image_percent if opts.image_scale == "percent"
                    else "custom" if opts.image_scale == "size" else None)
         index = self.cmb_image_scale.findData(current)
@@ -390,6 +397,9 @@ class MainWindow(QMainWindow):
 
         self.chk_ratio = CheckBox("Сохранять пропорции")
         self.chk_ratio.setChecked(opts.image_keep_ratio)
+        self.chk_ratio.setToolTip(
+            "Пустое поле — сторона считается по пропорциям. Снимите флажок, "
+            "чтобы задать точные размеры (картинка может исказиться).")
         self.chk_ratio.toggled.connect(lambda v: self._set_opt("image_keep_ratio", v))
         il.addWidget(self.chk_ratio)
 
@@ -407,10 +417,6 @@ class MainWindow(QMainWindow):
         self.chk_upscale.toggled.connect(lambda v: self._set_opt("image_allow_upscale", v))
         il.addWidget(self.chk_upscale)
 
-        upscale_hint = QLabel("«Разрешение» ограничивает длинную сторону")
-        upscale_hint.setObjectName("hint")
-        upscale_hint.setWordWrap(True)
-        il.addWidget(upscale_hint)
         lay.addWidget(self.image_box)
 
         # --- фрагмент ---
@@ -1097,6 +1103,55 @@ class MainWindow(QMainWindow):
         from PySide6.QtCore import QUrl
         from PySide6.QtGui import QDesktopServices
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(target)))
+
+    # ------------------------------------------------------------------ #
+    def _check_updates(self) -> None:
+        """Разовая проверка релизов на GitHub — только по нажатию кнопки."""
+        self.btn_update.setEnabled(False)
+        self._set_status(f"Проверяю обновления (установлена {APP_VERSION})…", "wait")
+
+        def worker() -> None:
+            try:
+                release = updates.check_latest(APP_VERSION)
+            except updates.UpdateError as exc:
+                self.bridge.updateReady.emit("error", str(exc))
+                return
+            self.bridge.updateReady.emit("result", release)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_update_ready(self, kind: str, payload) -> None:
+        self.btn_update.setEnabled(True)
+        if kind == "error":
+            self._set_status("Проверка обновлений не удалась", "error")
+            QMessageBox.warning(self, APP_NAME,
+                                f"Не удалось проверить обновления.\n\n{payload}")
+            return
+        if payload is None:
+            self._set_status(f"Обновлений нет · {APP_VERSION}", "ok")
+            QMessageBox.information(
+                self, APP_NAME,
+                f"Установлена последняя версия: {APP_VERSION}.")
+            return
+
+        release = payload
+        self._set_status(f"Доступна версия {release.version}", "ok")
+        box = QMessageBox(self)
+        box.setWindowTitle("Доступно обновление")
+        box.setIcon(QMessageBox.Information)
+        box.setText(f"Доступна версия <b>{release.version}</b>, "
+                    f"у вас установлена {APP_VERSION}.")
+        notes = (release.notes or "").strip()
+        if notes:
+            short = notes[:600] + ("…" if len(notes) > 600 else "")
+            box.setInformativeText(short)
+        open_btn = box.addButton("Открыть страницу релиза", QMessageBox.AcceptRole)
+        box.addButton("Позже", QMessageBox.RejectRole)
+        box.exec()
+        if box.clickedButton() is open_btn:
+            from PySide6.QtCore import QUrl
+            from PySide6.QtGui import QDesktopServices
+            QDesktopServices.openUrl(QUrl(release.url))
 
     def _show_about(self) -> None:
         ff = self.tools.version() if self.tools else "не найден"

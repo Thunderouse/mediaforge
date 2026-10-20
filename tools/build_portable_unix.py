@@ -27,6 +27,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from peutil import prune_orphans  # noqa: F401  (для Windows-веток не используется)
+from version import app_version  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 PY_SERIES = "3.12"
@@ -51,14 +52,14 @@ TARGETS = {
         "wheel_plats": ["manylinux_2_34_x86_64", "manylinux_2_28_x86_64",
                         "manylinux2014_x86_64", "linux_x86_64"],
         "ffmpeg_arch": "amd64",
-        "name": "MediaForge-portable-linux-x86_64",
+        "name": "portable-linux-x86_64",
     },
     "linux-aarch64": {
         "triple": "aarch64-unknown-linux-gnu",
         "wheel_plats": ["manylinux_2_39_aarch64", "manylinux_2_28_aarch64",
                         "manylinux2014_aarch64", "linux_aarch64"],
         "ffmpeg_arch": "arm64",
-        "name": "MediaForge-portable-linux-aarch64",
+        "name": "portable-linux-aarch64",
     },
 }
 
@@ -293,7 +294,7 @@ def missing_elf_deps(root: Path) -> dict[str, set[str]]:
 
 def build(target_key: str, out: Path, cache: Path, stage_dir: Path | None = None) -> Path:
     cfg = TARGETS[target_key]
-    name = cfg["name"]
+    name = f"MediaForge-{app_version()}-{cfg['name']}"
     stage = (stage_dir or out / "stage") / name
     if stage.exists():
         shutil.rmtree(stage)
