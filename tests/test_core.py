@@ -413,14 +413,14 @@ def test_frame_stream_returns_even_rgb_frames(tools, media):
 # --------------------------------------------------------------------------- #
 # Масштаб изображений и апскейл
 # --------------------------------------------------------------------------- #
-def test_target_size_percent_respects_upscale_flag():
+def test_target_size_percent_always_applies():
+    """Явный процент — прямое указание, флажок апскейла на него не влияет."""
     size = (1280, 800)
     assert target_image_size(size, fm.ConvertOptions()) == size
     assert target_image_size(size, fm.ConvertOptions(
         image_scale="percent", image_percent="50")) == (640, 400)
-    # без разрешения увеличения процент упирается в 100
     assert target_image_size(size, fm.ConvertOptions(
-        image_scale="percent", image_percent="200")) == size
+        image_scale="percent", image_percent="200")) == (2560, 1600)
     assert target_image_size(size, fm.ConvertOptions(
         image_scale="percent", image_percent="200",
         image_allow_upscale=True)) == (2560, 1600)
@@ -435,9 +435,9 @@ def test_target_size_explicit_dimensions():
     assert target_image_size(size, stretch) == (300, 150)
     only_width = fm.ConvertOptions(image_scale="size", image_width="320")
     assert target_image_size(size, only_width) == (320, 200)
-    # без апскейла явный размер не может быть больше исходного
+    # явный размер больше исходного применяется без флажка апскейла
     assert target_image_size(size, fm.ConvertOptions(
-        image_scale="size", image_width="2000", image_height="2000")) == size
+        image_scale="size", image_width="2000", image_height="2000")) == (2000, 1250)
 
 
 def test_target_size_resolution_and_upscale():

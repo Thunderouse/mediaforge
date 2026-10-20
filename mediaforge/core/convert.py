@@ -44,8 +44,9 @@ def target_image_size(size: tuple[int, int], opts: fm.ConvertOptions) -> tuple[i
     """Итоговый размер картинки: «Разрешение» (ограничение по длинной стороне),
     затем явный масштаб (проценты или ширина×высота).
 
-    Увеличение разрешено только при `image_allow_upscale`, иначе масштаб
-    упирается в исходный размер — чтобы «1080p» не растягивал маленькие фото.
+    Явный масштаб (проценты и «свой размер») применяется всегда — это прямое
+    указание пользователя. Флажок `image_allow_upscale` ограничивает только
+    список «Разрешение»: без него 1080p не растянет маленькое фото.
     """
     width, height = size
     if width <= 0 or height <= 0:
@@ -68,8 +69,6 @@ def target_image_size(size: tuple[int, int], opts: fm.ConvertOptions) -> tuple[i
             raise ConvertError("Некорректный процент масштаба") from None
         if percent <= 0:
             raise ConvertError("Процент масштаба должен быть больше нуля")
-        if percent > 100 and not opts.image_allow_upscale:
-            percent = 100.0
         k = percent / 100.0
         width, height = max(1, round(width * k)), max(1, round(height * k))
     elif opts.image_scale == "size":
@@ -84,15 +83,9 @@ def target_image_size(size: tuple[int, int], opts: fm.ConvertOptions) -> tuple[i
                 k = target_w / width
             else:
                 k = target_h / height
-            if k > 1 and not opts.image_allow_upscale:
-                k = 1.0
             width, height = max(1, round(width * k)), max(1, round(height * k))
         else:
-            new_w = target_w or width
-            new_h = target_h or height
-            if not opts.image_allow_upscale:
-                new_w, new_h = min(new_w, width), min(new_h, height)
-            width, height = max(1, new_w), max(1, new_h)
+            width, height = max(1, target_w or width), max(1, target_h or height)
     return width, height
 
 

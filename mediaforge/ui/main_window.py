@@ -384,9 +384,10 @@ class MainWindow(QMainWindow):
         self.edit_img_h = QLineEdit(str(opts.image_height or ""))
         self.edit_img_h.setPlaceholderText("высота")
         validator = QRegularExpressionValidator(QRegularExpression(r"^[0-9]{0,5}$"))
-        for edit in (self.edit_img_w, self.edit_img_h):
+        for edit, which in ((self.edit_img_w, "w"), (self.edit_img_h, "h")):
             edit.setValidator(validator)
-            edit.textChanged.connect(self._on_image_size_edited)
+            edit.textChanged.connect(
+                lambda _text, side=which: self._on_image_size_edited(side))
         times = QLabel("×")
         times.setFixedWidth(12)
         times.setAlignment(Qt.AlignCenter)
@@ -400,7 +401,7 @@ class MainWindow(QMainWindow):
         self.chk_ratio.setToolTip(
             "Пустое поле — сторона считается по пропорциям. Снимите флажок, "
             "чтобы задать точные размеры (картинка может исказиться).")
-        self.chk_ratio.toggled.connect(lambda v: self._set_opt("image_keep_ratio", v))
+        self.chk_ratio.toggled.connect(self._on_ratio_toggled)
         il.addWidget(self.chk_ratio)
 
         il.addWidget(self._field_label("Метод"))
@@ -410,10 +411,12 @@ class MainWindow(QMainWindow):
             lambda: self._set_opt("image_filter", self.cmb_image_filter.currentData()))
         il.addWidget(self.cmb_image_filter)
 
-        self.chk_upscale = CheckBox("Разрешить увеличение")
+        self.chk_upscale = CheckBox("Разрешение может увеличивать")
         self.chk_upscale.setChecked(opts.image_allow_upscale)
         self.chk_upscale.setToolTip(
-            "Без этого флажка масштаб и «Разрешение» только уменьшают картинку")
+            "Влияет только на список «Разрешение»: без флажка маленькая картинка "
+            "не растягивается до 1080p. Проценты и «Свой размер» применяются "
+            "всегда — это прямое указание.")
         self.chk_upscale.toggled.connect(lambda v: self._set_opt("image_allow_upscale", v))
         il.addWidget(self.chk_upscale)
 
@@ -948,6 +951,16 @@ class MainWindow(QMainWindow):
 
     def _on_image_scale(self) -> None:
         data = self.cmb_image_scale.currentData()
+        if data == "custom" and not (self.edit_img_w.text().strip()
+                                     or self.edit_img_h.text().strip()):
+            # стартуем от текущего размера первого изображения, а не с пустых полей
+            for job in self.jobs:
+                info = job.info
+                if info.kind == "image" and info.width and info.height:
+                    self._set_img_field(self.edit_img_w, str(info.width))
+                    self._set_img_field(self.edit_img_h, str(info.height))
+                    self._on_image_size_edited("w")
+                    break
         if data is None:
             self._set_opt("image_scale", "none")
         elif data == "custom":
@@ -957,7 +970,46 @@ class MainWindow(QMainWindow):
             self._set_opt("image_percent", data)
         self._update_image_widgets()
 
-    def _on_image_size_edited(self, _text: str = "") -> None:
+    def _image_aspect(self) -> float | None:
+        """Пропорции первого изображения в очереди — по ним подгоняем поля."""
+        for job in self.jobs:
+            info = job.info
+            if info.kind == "image" and info.width and info.height:
+                return info.width / info.height
+        return None
+
+    def _set_img_field(self, edit: QLineEdit, value: str) -> None:
+        if edit.text() == value:
+            return
+        edit.blockSignals(True)
+        edit.setText(value)
+        edit.blockSignals(False)
+
+    def _on_ratio_toggled(self, checked: bool) -> None:
+        self._set_opt("image_keep_ratio", checked)
+        if not checked:
+            return
+        if self.edit_img_w.text().strip():
+            self._on_image_size_edited("w")
+        elif self.edit_img_h.text().strip():
+            self._on_image_size_edited("h")
+
+    def _on_image_size_edited(self, which: str = "w") -> None:
+        """Ручной размер в пикселях: при «Сохранять пропорции» вторая сторона
+        пересчитывается сразу, чтобы в интерфейсе был реальный размер."""
+        if self.chk_ratio.isChecked():
+            aspect = self._image_aspect()
+            if aspect:
+                if which == "w":
+                    text = self.edit_img_w.text().strip()
+                    if text.isdigit() and int(text) > 0:
+                        self._set_img_field(
+                            self.edit_img_h, str(max(1, round(int(text) / aspect))))
+                else:
+                    text = self.edit_img_h.text().strip()
+                    if text.isdigit() and int(text) > 0:
+                        self._set_img_field(
+                            self.edit_img_w, str(max(1, round(int(text) * aspect))))
         self._set_opt("image_width", self.edit_img_w.text().strip())
         self._set_opt("image_height", self.edit_img_h.text().strip())
 
