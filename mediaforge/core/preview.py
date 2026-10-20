@@ -51,21 +51,79 @@ def frame_at(src: Path, tools: Tools, at: float, max_width: int = 720) -> Path |
     ], out)
 
 
+def filmstrip_frames(src: Path, tools: Tools, duration: float,
+                     count: int = 12) -> list[Path]:
+    """Кадры полоски: по одному `-ss` на кадр, параллельно.
+
+    Декодировать файл целиком фильтром `fps,tile` нельзя: на длинном видео
+    ffmpeg проходит его от начала до конца (минуты), а интерфейс в это время
+    висит. Двенадцать отдельных seek'ов — доли секунды даже на часовом файле.
+    """
+    if duration <= 0:
+        return []
+    times = [(i + 0.5) * duration / count for i in range(count)]
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        paths = list(pool.map(lambda t: frame_at(src, tools, t, 320), times))
+    return [p for p in paths if p is not None]
+
+
 def filmstrip(src: Path, tools: Tools, duration: float,
               count: int = 12, tile_width: int = 160) -> Path | None:
-    """Полоска из `count` кадров, по одному на равных интервалах."""
+    """Горизонтальная полоска из `count` кадров (собирается через Pillow)."""
     if duration <= 0:
         return None
     out = _cache_path(src, "strip", count, tile_width, round(duration, 2))
     if out.exists():
         return out
-    fps = max(count / duration, 0.01)
-    return _run(tools, [
-        "-i", str(src),
-        "-vf", f"fps={fps:.6f},scale={tile_width}:-2:flags=lanczos,"
-               f"tile={count}x1:padding=0:margin=0",
-        "-frames:v", "1",
-    ], out)
+    frames = filmstrip_frames(src, tools, duration, count)
+    if not frames:
+        return None
+    try:
+        from PIL import Image
+
+        tiles = []
+        for path in frames:
+            with Image.open(path) as im:
+                im = im.convert("RGB")
+                h = max(2, round(tile_width * im.height / im.width / 2) * 2)
+                tiles.append(im.resize((tile_width, h), Image.LANCZOS))
+        height = max(t.height for t in tiles)
+        strip = Image.new("RGB", (tile_width * len(tiles), height), (0, 0, 0))
+        for index, tile in enumerate(tiles):
+            strip.paste(tile, (index * tile_width,
+                               (height - tile.height) // 2))
+        strip.save(out, "PNG")
+        return out
+    except Exception:  # noqa: BLE001 — без Pillow остаётся только кадр
+        return None
+
+
+def open_frame_stream(src: Path, tools: Tools, info: MediaInfo,
+                      start: float, end: float, fps: int = 12,
+                      max_height: int = 480) -> tuple[subprocess.Popen, int, int]:
+    """Запускает ffmpeg, отдающий кадры rgb24 в stdout (для «проигрывания»).
+
+    Возвращает (process, width, height). Кадр занимает width*height*3 байт.
+    Звук не воспроизводится: полноценный плеер потребовал бы QtMultimedia.
+    """
+    height = max(2, min(max_height, info.height or max_height) // 2 * 2)
+    width = max(2, round(height * (info.width or 16) / (info.height or 9) / 2) * 2)
+    duration = max(0.05, (end or info.duration) - start)
+    cmd = [
+        tools.ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error",
+        # -re: читаем вход в реальном времени, иначе ffmpeg за секунду
+        # выплёвывает весь фрагмент и «проигрывание» мгновенно заканчивается
+        "-re", "-ss", f"{max(0.0, start):.3f}", "-i", str(src), "-t", f"{duration:.3f}",
+        "-vf", f"fps={fps},scale={width}:{height}:flags=fast_bilinear",
+        "-an", "-sn", "-f", "rawvideo", "-pix_fmt", "rgb24", "-",
+    ]
+    proc = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        stdin=subprocess.DEVNULL, **_popen_flags(),
+    )
+    return proc, width, height
 
 
 def waveform(src: Path, tools: Tools, width: int = 900, height: int = 120) -> Path | None:
@@ -127,5 +185,6 @@ def thumbnail_path(src: Path, tools: Tools, info: MediaInfo) -> Path | None:
     return frame_at(src, tools, min(1.0, (info.duration or 2.0) / 3))
 
 
-__all__ = ["CACHE_DIR", "cache_size", "cleanup", "filmstrip", "frame_at",
-           "image_preview", "thumbnail_path", "waveform"]
+__all__ = ["CACHE_DIR", "cache_size", "cleanup", "filmstrip", "filmstrip_frames",
+           "frame_at", "image_preview", "open_frame_stream", "thumbnail_path",
+           "waveform"]

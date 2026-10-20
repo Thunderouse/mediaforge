@@ -391,3 +391,19 @@ def test_image_preview_via_pillow(tools, media):
     preview = pv.image_preview(media["png"], tools, 100)
     assert preview and preview.exists()
     assert Image.open(preview).width <= 100
+
+
+@needs_ffmpeg
+def test_frame_stream_returns_even_rgb_frames(tools, media):
+    """Поток кадров для «проигрывания»: ровные размеры и целый кадр в rgb24."""
+    assert "clip" in media
+    info = probe(media["clip"], tools)
+    proc, width, height = pv.open_frame_stream(media["clip"], tools, info,
+                                              0.0, 1.0, fps=8, max_height=120)
+    try:
+        assert width % 2 == 0 and height % 2 == 0
+        frame = proc.stdout.read(width * height * 3)
+        assert frame is not None and len(frame) == width * height * 3
+    finally:
+        proc.kill()
+        proc.wait(timeout=5)

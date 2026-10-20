@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import queue
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from PySide6.QtCore import QRectF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import (QColor, QFont, QFontMetrics, QPainter,
+from PySide6.QtGui import (QColor, QFont, QFontMetrics, QImage, QPainter,
                            QPainterPath, QPen, QPixmap)
 from PySide6.QtWidgets import (QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
                                QPushButton, QSizePolicy, QSlider, QVBoxLayout,
@@ -16,6 +19,7 @@ from ..core.engine import Job
 from ..core.ffmpeg import Tools
 from ..core.timecode import format_timecode
 from . import theme
+from .widgets import IconButton
 
 
 class Filmstrip(QWidget):
@@ -156,18 +160,26 @@ class Filmstrip(QWidget):
             painter.fillRect(QRectF(px - 0.5, 0, 1.5, rect.height()),
                              QColor(255, 255, 255, 200))
 
-            # подписи
+            # подписи: при узком выделении выносим их наружу, иначе наезжают
             font = QFont(self.font())
             font.setPointSizeF(max(7.0, font.pointSizeF() - 2))
             painter.setFont(font)
             painter.setPen(QColor(p["on_accent"]))
             metrics = QFontMetrics(font)
-            for value, x, align in ((self._start, sx + 8, Qt.AlignLeft),
-                                    (self._end, ex - 8, Qt.AlignRight)):
-                text = format_timecode(value)
+            narrow = (ex - sx) < 110
+            labels = []
+            if narrow:
+                labels.append((format_timecode(self._start), sx - 4, Qt.AlignRight))
+                labels.append((format_timecode(self._end), ex + 4, Qt.AlignLeft))
+            else:
+                labels.append((format_timecode(self._start), sx + 6, Qt.AlignLeft))
+                labels.append((format_timecode(self._end), ex - 6, Qt.AlignRight))
+            for text, x, align in labels:
                 w = metrics.horizontalAdvance(text) + 8
-                box = QRectF(x - (w if align == Qt.AlignRight else 0), rect.height() - 18, w, 14)
-                painter.fillRect(box, QColor(0, 0, 0, 150))
+                left = x - w if align == Qt.AlignRight else x
+                left = min(max(0.0, left), rect.width() - w)
+                box = QRectF(left, rect.height() - 17, w, 14)
+                painter.fillRect(box, QColor(0, 0, 0, 165))
                 painter.drawText(box, align | Qt.AlignVCenter, f" {text} ")
         painter.end()
 
@@ -184,6 +196,10 @@ class _ScaledImage(QLabel):
         self._pixmap = QPixmap(str(path)) if path and Path(path).exists() else None
         self._rescale()
 
+    def set_qimage(self, image: QImage) -> None:
+        self._pixmap = QPixmap.fromImage(image)
+        self._rescale()
+
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
         self._rescale()
@@ -198,11 +214,73 @@ class _ScaledImage(QLabel):
         self.setPixmap(self._pixmap.scaled(area, Qt.KeepAspectRatio, Qt.SmoothTransformation))
 
 
+
+class _FramePlayer:
+    """Читает rgb24-кадры из ffmpeg в фоновом потоке.
+
+    Это «проигрывание» вырезанного фрагмента без QtMultimedia: 12 кадров/с,
+    без звука. Очередь маленькая — если интерфейс не успевает, старые кадры
+    выбрасываются, и видео не отстаёт от реального времени.
+    """
+
+    def __init__(self, job: Job, tools: Tools, start: float, end: float, fps: int = 12):
+        self.fps = fps
+        self._queue: queue.Queue[bytes] = queue.Queue(maxsize=4)
+        self._proc, self.width, self.height = pv.open_frame_stream(
+            job.src, tools, job.info, start, end, fps=fps)
+        self._alive = True
+        self._thread = threading.Thread(target=self._pump, daemon=True)
+        self._thread.start()
+
+    def _pump(self) -> None:
+        frame_size = self.width * self.height * 3
+        stdout = self._proc.stdout
+        try:
+            while self._alive and stdout is not None:
+                chunk = stdout.read(frame_size)
+                if not chunk or len(chunk) < frame_size:
+                    break
+                while self._alive:
+                    try:
+                        self._queue.put_nowait(chunk)
+                        break
+                    except queue.Full:
+                        try:
+                            self._queue.get_nowait()
+                        except queue.Empty:
+                            break
+        except (OSError, ValueError):
+            pass
+        finally:
+            self._alive = False
+
+    def read(self) -> bytes | None:
+        try:
+            return self._queue.get_nowait()
+        except queue.Empty:
+            return None
+
+    def finished(self) -> bool:
+        return not self._alive and self._queue.empty()
+
+    def close(self) -> None:
+        self._alive = False
+        try:
+            self._proc.kill()
+        except OSError:
+            pass
+        try:
+            self._thread.join(timeout=1.0)
+        except RuntimeError:
+            pass
+
+
 class PreviewPanel(QWidget):
     """Слева список файлов, справа кадр и ползунки фрагмента."""
 
     trimChanged = Signal(float, float)
     jobSelected = Signal(str)
+    renderReady = Signal(str, dict)
 
     def __init__(self, tools: Tools | None, parent=None):
         super().__init__(parent)
@@ -257,16 +335,120 @@ class PreviewPanel(QWidget):
         self.caption.setObjectName("hint")
         right.addWidget(self.caption)
 
+        controls = QHBoxLayout()
+        controls.setSpacing(8)
+        self.btn_play = IconButton("play", "Проиграть фрагмент", 18)
+        self.btn_play.setCheckable(True)
+        self.btn_play.setFixedSize(34, 30)
+        self.btn_play.clicked.connect(self._toggle_play)
+        controls.addWidget(self.btn_play)
+
         self.btn_reset = QPushButton("Сбросить фрагмент")
         self.btn_reset.setObjectName("ghost")
         self.btn_reset.setCursor(Qt.PointingHandCursor)
         self.btn_reset.clicked.connect(self._reset_trim)
-        right.addWidget(self.btn_reset, 0, Qt.AlignLeft)
+        controls.addWidget(self.btn_reset)
+        controls.addStretch(1)
+        right.addLayout(controls)
 
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
         self._timer.setInterval(120)
         self._timer.timeout.connect(self._load_frame)
+
+        # предпросмотр готовится в фоне: иначе ffmpeg подвешивал бы окно
+        self._pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix="preview")
+        self._token = 0
+        self._frame_token = 0
+        self.renderReady.connect(self._on_render_ready)
+
+        self._player: _FramePlayer | None = None
+        self._play_pos = 0.0
+        self._play_timer = QTimer(self)
+        self._play_timer.setInterval(int(1000 / 12))
+        self._play_timer.timeout.connect(self._on_play_tick)
+
+
+    # ------------------------------------------------------------------ #
+    # Проигрывание фрагмента (без звука, кадры из ffmpeg)
+    # ------------------------------------------------------------------ #
+    def _toggle_play(self, checked: bool) -> None:
+        if checked:
+            self._start_playback()
+        else:
+            self._stop_playback()
+
+    def _start_playback(self) -> None:
+        job = self._job
+        ready = (job is not None and self.tools is not None
+                 and job.info.kind == "video" and job.info.duration > 0)
+        if not ready:
+            self.btn_play.setChecked(False)
+            if job is not None and job.info.kind != "video":
+                self.caption.setText("Проигрывание доступно для видео")
+            return
+        start, end = self._trim
+        start = max(0.0, start)
+        end = end if end > 0 else job.info.duration
+        if end <= start + 0.05:
+            self.btn_play.setChecked(False)
+            return
+        self._player = _FramePlayer(job, self.tools, start, end)
+        self._play_pos = start
+        self.btn_play.set_icon("pause")
+        self.btn_play.setToolTip("Пауза")
+        self._play_timer.start()
+
+    def _stop_playback(self) -> None:
+        self._play_timer.stop()
+        if self._player is not None:
+            self._player.close()
+            self._player = None
+        if hasattr(self, "btn_play"):
+            self.btn_play.setChecked(False)
+            self.btn_play.set_icon("play")
+            self.btn_play.setToolTip("Проиграть фрагмент")
+
+    def _on_play_tick(self) -> None:
+        player = self._player
+        job = self._job
+        if player is None or job is None:
+            self._stop_playback()
+            return
+        buffer = player.read()
+        if buffer is None:
+            if player.finished():
+                # фрагмент закончился — начинаем заново, чтобы можно было
+                # оценить петлю и границы
+                self._restart_playback()
+            return
+        image = QImage(buffer, player.width, player.height,
+                       player.width * 3, QImage.Format_RGB888).copy()
+        self.image.set_qimage(image)
+        self._play_pos = min(job.info.duration, self._play_pos + 1.0 / player.fps)
+        self.strip.set_position(self._play_pos)
+        duration = max(0.001, job.info.duration)
+        self.slider.blockSignals(True)
+        self.slider.setValue(int(self._play_pos / duration * 1000))
+        self.slider.blockSignals(False)
+        self._update_caption(playing=True)
+
+    def _restart_playback(self) -> None:
+        job = self._job
+        if job is None:
+            self._stop_playback()
+            return
+        start, end = self._trim
+        start = max(0.0, start)
+        end = end if end > 0 else job.info.duration
+        if self._player is not None:
+            self._player.close()
+        self._player = _FramePlayer(job, self.tools, start, end)
+        self._play_pos = start
+
+    def closeEvent(self, event) -> None:  # noqa: N802
+        self._stop_playback()
+        super().closeEvent(event)
 
     # ------------------------------------------------------------------ #
     def set_jobs(self, jobs: list[Job]) -> None:
@@ -333,40 +515,65 @@ class PreviewPanel(QWidget):
         self.slider.setVisible(has_timeline)
         self.btn_reset.setVisible(has_timeline)
 
+        self._stop_playback()
         if self.tools is None:
             self.image.set_image(None)
             self.caption.setText("Предпросмотр недоступен без ffmpeg")
             return
 
-        if info.kind == "image":
-            self.image.set_image(pv.image_preview(job.src, self.tools))
-            self.strip.set_strip(None)
-            self.caption.setText(f"{info.resolution_label} · {info.size_label}")
-            return
-
         if has_timeline:
             self.strip.set_duration(info.duration)
             self.strip.set_trim(*self._trim)
-            if info.kind == "video":
-                self.strip.set_strip(pv.filmstrip(job.src, self.tools, info.duration))
-            else:
-                self.strip.set_strip(pv.waveform(job.src, self.tools, 1400, 120))
             self.strip.set_position(0)
-        self._load_frame()
+
+        # кадры/полоска/волна готовятся в фоне — окно не должно подвисать
+        self._token += 1
+        token = str(self._token)
+        self.image.set_image(None)
+        self.strip.set_strip(None)
+        self.caption.setText("готовлю предпросмотр…")
+        self._pool.submit(self._render_media, job, token)
+
+    def _render_media(self, job: Job, token: str) -> None:
+        data: dict = {}
+        try:
+            info = job.info
+            if info.kind == "video":
+                data["strip"] = pv.filmstrip(job.src, self.tools, info.duration or 0)
+            elif info.kind == "audio":
+                data["strip"] = pv.waveform(job.src, self.tools, 1400, 120)
+            data["frame"] = pv.thumbnail_path(job.src, self.tools, info)
+        except Exception:  # noqa: BLE001 — битый файл не должен ронять окно
+            data["error"] = True
+        self.renderReady.emit(token, data)
+
+    def _on_render_ready(self, token: str, data: dict) -> None:
+        if token.startswith("f"):
+            if token != f"f{self._frame_token}":
+                return
+        elif token != str(self._token):
+            return
+        if data.get("strip"):
+            self.strip.set_strip(data["strip"])
+        if data.get("frame"):
+            self.image.set_image(data["frame"])
         self._update_caption()
 
     def _load_frame(self) -> None:
         job = self._job
         if job is None or self.tools is None:
             return
-        if job.info.kind == "image":
+        if job.info.kind != "video":
             return
         position = self.slider.value() / 1000 * max(0.0, job.info.duration)
-        if job.info.kind == "video":
-            self.image.set_image(pv.frame_at(job.src, self.tools, position))
-        else:
-            self.image.set_image(pv.waveform(job.src, self.tools, 1200, 260))
-        self._update_caption()
+        self._frame_token += 1
+        token = f"f{self._frame_token}"
+        self._pool.submit(self._render_frame, job, position, token)
+
+    def _render_frame(self, job: Job, position: float, token: str) -> None:
+        path = pv.frame_at(job.src, self.tools, position)
+        if path is not None:
+            self.renderReady.emit(token, {"frame": path})
 
     def _on_slider(self, value: int) -> None:
         if self._job is None:
@@ -396,7 +603,7 @@ class PreviewPanel(QWidget):
         self._update_caption()
         self.trimChanged.emit(0.0, 0.0)
 
-    def _update_caption(self) -> None:
+    def _update_caption(self, playing: bool = False) -> None:
         job = self._job
         if job is None:
             return
@@ -413,5 +620,5 @@ class PreviewPanel(QWidget):
                          f"{format_timecode(end) if end else 'конец'} ({length:.1f} с)")
         else:
             parts.append("фрагмент — весь файл")
-        parts.append("потяните ручки на полоске кадров")
+        parts.append("▶ проигрывание" if playing else "потяните ручки на полоске кадров")
         self.caption.setText("   ·   ".join(parts))
