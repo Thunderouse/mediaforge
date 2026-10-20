@@ -5,10 +5,18 @@
 """
 
 import os
+import re
 import sys
 from pathlib import Path
 
 ROOT = Path(SPECPATH).resolve()
+
+# версию берём из кода, чтобы не расходилась с тегом
+_version_match = re.search(
+    r'APP_VERSION\s*=\s*"([^"]+)"',
+    (ROOT / "mediaforge" / "core" / "config.py").read_text(encoding="utf-8"),
+)
+APP_VERSION = _version_match.group(1) if _version_match else "0.0.0"
 BIN = ROOT / "bin"
 ASSETS = ROOT / "assets"
 
@@ -78,8 +86,8 @@ if sys.platform == "darwin":
         info_plist={
             "CFBundleName": "MediaForge",
             "CFBundleDisplayName": "MediaForge",
-            "CFBundleShortVersionString": "1.0.0",
-            "CFBundleVersion": "1.0.0",
+            "CFBundleShortVersionString": APP_VERSION,
+            "CFBundleVersion": APP_VERSION,
             "NSHighResolutionCapable": True,
             "LSMinimumSystemVersion": "14.0",
             "LSApplicationCategoryType": "public.app-category.video",
