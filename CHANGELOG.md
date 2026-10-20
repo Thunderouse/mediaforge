@@ -32,7 +32,9 @@
 
 - портативная сборка Windows: embeddable Python 3.11 + PySide6 + Pillow + ffmpeg,
   нативный лаунчер `MediaForge.exe` (кросс-компиляция `zig cc`), настройки в `data\`;
-- `MediaForge.cmd` / `-debug.cmd` / `-check.cmd` для диагностики;
+- портативные сборки Linux x86_64 и aarch64: python-build-standalone + wheels
+  manylinux + ffmpeg (shared), лаунчер `MediaForge.sh` и `.desktop`-ярлык;
+- `MediaForge.cmd` / `-debug.cmd` / `-check.cmd` для диагностики на Windows;
 - сборка `.exe` через PyInstaller (`build_windows.ps1`, `MediaForge.spec`);
 - консольный режим `python -m mediaforge.cli`;
 - 18 pytest-тестов на ядро, CI на Linux и Windows.

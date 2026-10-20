@@ -10,13 +10,34 @@
 
 ## Скачать и запустить
 
-1. Скачайте `MediaForge-portable-win64.zip` со страницы [Releases](../../releases) (≈126 МБ).
-2. Распакуйте архив целиком в любую папку — например, `C:\Tools\MediaForge`.
-   Важно: всю папку, а не отдельные файлы.
-3. Двойной клик по **`MediaForge.exe`** — всё. ffmpeg, Python и библиотеки уже внутри.
+| Платформа | Файл | Требования |
+|---|---|---|
+| Windows 10/11 x64 | `MediaForge-portable-win64.zip` | ничего, только распаковать |
+| Linux x86_64 | `MediaForge-portable-linux-x86_64.tar.gz` | glibc 2.34+ (Ubuntu 22.04+, Debian 12+) |
+| Linux aarch64 | `MediaForge-portable-linux-aarch64.tar.gz` | glibc 2.39+ (Ubuntu 24.04+, Debian 13+) |
+| macOS | пока из исходников (см. ниже) | macOS 14+ |
 
-Установка и права администратора не нужны. Ярлык делается обычным способом:
-правый клик по `MediaForge.exe` → «Отправить» → «Рабочий стол (создать ярлык)».
+Все архивы лежат на странице [Releases](../../releases).
+
+**Windows**
+
+1. Распакуйте архив целиком в любую папку — например, `C:\Tools\MediaForge`.
+   Важно: всю папку, а не отдельные файлы.
+2. Двойной клик по **`MediaForge.exe`** — всё. ffmpeg, Python и библиотеки уже внутри.
+
+**Linux**
+
+1. `tar -xzf MediaForge-portable-linux-*.tar.gz` и зайдите в папку.
+2. `./MediaForge.sh` (если файл не запускается — `chmod +x MediaForge.sh`).
+3. Ярлык в меню приложений: `./create-shortcut.sh`.
+
+Если система минимальная (без графических библиотек), доставьте их:
+`sudo apt install libegl1 libgl1 libxkbcommon-x11-0 libxcb-cursor0 libxcb-icccm4
+libxcb-image0 libxcb-keysyms1 libxcb-render-util0 libxcb-shape0`.
+
+Установка не нужна, права администратора (root) не нужны. Ярлык делается обычным
+способом: правый клик по `MediaForge.exe` → «Отправить» → «Рабочий стол
+(создать ярлык)».
 
 > Первый запуск может сопровождаться предупреждением SmartScreen об «неизвестном
 > издателе» — сборка не подписана платным сертификатом. «Подробнее» →
@@ -97,12 +118,24 @@ python -m mediaforge.cli ./photos --to webp -r 1080 --gentle
 
 ## Другие системы и сборка из исходников
 
-Код кроссплатформенный (Qt + ffmpeg): на Linux и macOS запускается из исходников —
-`./start.sh` либо `pip install -r requirements.txt && python -m mediaforge`.
-Нужен установленный `ffmpeg` (`apt install ffmpeg`, `brew install ffmpeg`).
+**macOS.** Портативного архива пока нет: сборка под macOS требует самой macOS
+(PyInstaller не кросс-компилирует, а для arm64 нужна хотя бы ad-hoc подпись
+бинарников). Из исходников запускается так:
 
-Для разработчика — архитектура, тесты, сборка `.exe` и portable-архива:
-**[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)**.
+```bash
+brew install ffmpeg python@3.12
+pip install -r requirements.txt
+python -m mediaforge
+```
+
+Готовый `.app` собирается на Mac скриптом `./build_unix.sh`; для раздачи другим
+людям понадобится подпись Developer ID и нотаризация Apple.
+
+**Linux (из исходников).** `./start.sh` либо
+`pip install -r requirements.txt && python -m mediaforge`, нужен системный `ffmpeg`.
+
+Для разработчика — архитектура, тесты, сборка `.exe`, portable-архивов для
+Windows и Linux: **[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)**.
 
 ## Нагрузка на систему
 

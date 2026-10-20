@@ -175,6 +175,25 @@ def build_launcher(target: Path) -> bool:
     return ok
 
 
+def ensure_wheels(cache: Path) -> list[Path]:
+    """Колёса под win_amd64: из кэша, а если его нет — скачиваем pip'ом."""
+    wheels_dir = cache / "wheels"
+    wheels = sorted(wheels_dir.glob("*.whl"))
+    if wheels:
+        return wheels
+    wheels_dir.mkdir(parents=True, exist_ok=True)
+    print("  кэш пуст — скачиваю колёса")
+    subprocess.run([
+        sys.executable, "-m", "pip", "download", "--only-binary=:all:", "--no-deps",
+        "--platform", "win_amd64", "--python-version", "3.11", "-d", str(wheels_dir),
+        "PySide6-Essentials", "shiboken6", "Pillow",
+    ], check=True)
+    wheels = sorted(wheels_dir.glob("*.whl"))
+    if not wheels:
+        raise SystemExit("не удалось скачать колёса для win_amd64")
+    return wheels
+
+
 def build(stage: Path, out: Path, keep_cache: Path) -> Path:
     name = "MediaForge-portable-win64"
     target = stage / name
@@ -191,9 +210,7 @@ def build(stage: Path, out: Path, keep_cache: Path) -> Path:
 
     # 2. wheels
     print("→ PySide6 / Pillow")
-    wheels = sorted((keep_cache / "wheels").glob("*.whl"))
-    if not wheels:
-        raise SystemExit("нет wheels в кэше — сначала pip download для win_amd64")
+    wheels = ensure_wheels(keep_cache)
     site_packages = target / "app" / "Lib" / "site-packages"
     for whl in wheels:
         print(f"  {whl.name}")

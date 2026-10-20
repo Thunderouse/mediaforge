@@ -113,7 +113,8 @@ def test_iter_media_files(tmp_path):
     (tmp_path / "sub").mkdir()
     (tmp_path / "a.png").write_bytes(b"x")
     (tmp_path / "sub" / "b.mp4").write_bytes(b"x")
-    (tmp_path / "note.txt").write_text("не медиа")
+    # encoding обязателен: на Windows локаль по умолчанию cp1252 и кириллица падает
+    (tmp_path / "note.txt").write_text("не медиа", encoding="utf-8")
     found = {p.name for p in iter_media_files([tmp_path], recursive=True)}
     assert found == {"a.png", "b.mp4"}
 

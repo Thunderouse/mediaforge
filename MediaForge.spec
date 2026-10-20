@@ -67,3 +67,21 @@ coll = COLLECT(
     upx_exclude=[],
     name="MediaForge",
 )
+
+# на macOS собираем .app, иначе получается голый unix-бинарник без иконки в Dock
+if sys.platform == "darwin":
+    app = BUNDLE(
+        coll,
+        name="MediaForge.app",
+        icon=str(ASSETS / "icon.icns") if (ASSETS / "icon.icns").exists() else None,
+        bundle_identifier="ru.mediaforge.app",
+        info_plist={
+            "CFBundleName": "MediaForge",
+            "CFBundleDisplayName": "MediaForge",
+            "CFBundleShortVersionString": "1.0.0",
+            "CFBundleVersion": "1.0.0",
+            "NSHighResolutionCapable": True,
+            "LSMinimumSystemVersion": "14.0",
+            "LSApplicationCategoryType": "public.app-category.video",
+        },
+    )

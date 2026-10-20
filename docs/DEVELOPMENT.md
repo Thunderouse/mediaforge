@@ -119,6 +119,49 @@ python tools/check_portable.py build/portable/MediaForge-portable-win64
 Лаунчер выставляет `MEDIAFORGE_BIN` и `MEDIAFORGE_CONFIG_DIR`, поэтому настройки
 портативной сборки живут в `data\` рядом с программой.
 
+## Portable-сборка Linux (x86_64 / aarch64)
+
+```bash
+pip install pefile pyelftools
+python tools/build_portable_unix.py --target linux-aarch64
+python tools/build_portable_unix.py --target linux-x86_64
+```
+
+Что делает скрипт:
+
+1. качает `python-build-standalone` (CPython 3.12) под нужную тройку и wheels
+   `manylinux`/`linux` для PySide6 и Pillow (перебирает теги от свежего к старому,
+   потому что PySide6 публикует только `manylinux_2_34_x86_64` и
+   `manylinux_2_39_aarch64`);
+2. вырезает неиспользуемые модули Qt и мусор Python (`test`, `pip`, `tkinter`,
+   заголовки) — около 130 МБ;
+3. **чистит сирот по ELF-импортам** (`DT_NEEDED`): удаляет файл, если его
+   зависимость вырезана, с защитным списком (`*.abi3.so`, `shiboken6/*`,
+   `libQt6Core/Gui/Widgets/Svg`). Чистка должна идти от корня `site-packages`,
+   а не от `PySide6/`: `libshiboken6.abi3.so.6.12` лежит в соседнем пакете
+   `shiboken6/`, иначе весь Qt принимается за «сироту» и удаляется;
+4. берёт ffmpeg из BtbN **shared**-сборки (`bin/` + `lib/`, бинарники находят
+   библиотеки по `$ORIGIN/../lib`) — 163 МБ вместо 257 МБ у двух статических
+   бинарников; johnvansickle — резервный источник;
+5. кладёт `MediaForge.sh`, `create-shortcut.sh` (`.desktop` в
+   `~/.local/share/applications`), `README.txt`, `icon.png`;
+6. проверяет, что все ELF-зависимости замыкаются внутри архива (системный список
+   в `_SYSTEM_ELF`), и пакует `tar.gz`.
+
+Грабли, на которые уже наступили:
+
+- `python-build-standalone` содержит симлинк-петли в `share/terminfo` — распаковка
+  падает с `OSError: Too many levels of symbolic links`; папку нужно пропускать
+  при извлечении, а не пытаться распаковать целиком;
+- при извлечении нельзя ставить `set_attrs=False`, иначе теряются биты
+  исполнения и `python/bin/python3` не запускается;
+- `tarfile` в Python 3.14 применяет фильтр `data` по умолчанию, который валится
+  на тех же terminfo-петлях — надёжнее извлекать по одному члену.
+
+macOS этим скриптом не собирается принципиально: PyInstaller/PBS-архивы для arm64
+требуют подписи (`codesign -s -` минимум), а Linux её не сделает. Сборка — на Mac
+(`./build_unix.sh`) или в GitHub Actions (`macos-latest`).
+
 ## Особенности реализации, о которых легко забыть
 
 - Под `pythonw.exe` `sys.stderr is None`: любые записи в него падают. Эксепшн-хук
