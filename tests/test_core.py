@@ -16,6 +16,7 @@ from mediaforge.core import formats as fm
 from mediaforge.core.convert import (ConvertError, build_audio_cmd, build_gif_cmd,
                                      build_video_cmd, convert_file, trim_plan,
                                      unique_path)
+from mediaforge.core import preview as pv
 from mediaforge.core.timecode import format_timecode, parse_timecode
 from mediaforge.core.ffmpeg import (MediaInfo, Tools, human_duration, human_size,
                                    iter_media_files, probe)
@@ -343,3 +344,50 @@ def test_trim_args_in_commands(tools, media):
         # -ss должен стоять до -i, -t — после
         assert joined.index("-ss 1.000") < joined.index("-i ")
         assert "-t 1.000" in joined
+
+
+# --------------------------------------------------------------------------- #
+# Предпросмотр (кадры, полоска, волна)
+# --------------------------------------------------------------------------- #
+@needs_ffmpeg
+def test_preview_frame_and_strip(tools, media, tmp_path):
+    from PIL import Image
+
+    pytest.importorskip("PIL")
+    assert "clip" in media, "нужно тестовое видео"
+    pv.cleanup()
+    frame = pv.frame_at(media["clip"], tools, 0.5, 320)
+    assert frame and frame.exists()
+    assert Image.open(frame).width <= 320
+
+    strip = pv.filmstrip(media["clip"], tools, 2.0, count=6, tile_width=80)
+    assert strip and strip.exists()
+    assert Image.open(strip).width > 100
+
+    # повторный запрос берётся из кэша, ffmpeg заново не запускается
+    assert pv.frame_at(media["clip"], tools, 0.5, 320) == frame
+
+
+def test_preview_cache_cleanup(media):
+    pv.cleanup()
+    assert pv.cache_size() == 0
+
+
+@needs_ffmpeg
+def test_preview_waveform(tools, media):
+    from PIL import Image
+
+    pytest.importorskip("PIL")
+    assert "wav" in media
+    wave = pv.waveform(media["wav"], tools, 300, 80)
+    assert wave and wave.exists()
+    assert Image.open(wave).size[0] <= 300
+
+
+def test_image_preview_via_pillow(tools, media):
+    from PIL import Image
+
+    pytest.importorskip("PIL")
+    preview = pv.image_preview(media["png"], tools, 100)
+    assert preview and preview.exists()
+    assert Image.open(preview).width <= 100

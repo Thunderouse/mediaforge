@@ -11,7 +11,7 @@ from pathlib import Path
 from .formats import ConvertOptions
 
 APP_NAME = "MediaForge"
-APP_VERSION = "1.0.3"
+APP_VERSION = "1.1.0"
 
 
 def config_dir() -> Path:

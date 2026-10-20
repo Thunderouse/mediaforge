@@ -197,6 +197,30 @@ QLineEdit {
 QLineEdit:focus { border-color: $accent; }
 QLineEdit:disabled { color: $dim; }
 
+QTabWidget#mainTabs::pane { border: none; background: $bg; }
+QTabWidget#mainTabs > QTabBar { background: $surface; }
+QTabBar::tab {
+    background: transparent; color: $muted; padding: 7px 16px; margin: 6px 2px 6px 0;
+    border-radius: 8px; font-size: 12px;
+}
+QTabBar::tab:selected { background: $card; color: $text; font-weight: 600; }
+QTabBar::tab:hover { color: $text; }
+
+QListWidget#previewList {
+    background: $card; border: 1px solid $border; border-radius: 10px; padding: 4px;
+    outline: none;
+}
+QListWidget#previewList::item { padding: 7px 8px; border-radius: 7px; color: $muted; }
+QListWidget#previewList::item:selected { background: $selection; color: $text; }
+QListWidget#previewList::item:hover { color: $text; }
+
+QSlider::groove:horizontal { height: 4px; background: $border; border-radius: 2px; }
+QSlider::sub-page:horizontal { background: $accent; border-radius: 2px; }
+QSlider::handle:horizontal {
+    width: 14px; height: 14px; margin: -5px 0; border-radius: 7px; background: $accent;
+}
+QSlider::handle:horizontal:hover { background: $accent_hover; }
+
 QScrollArea { background: transparent; border: none; }
 QScrollArea > QWidget > QWidget { background: transparent; }
 QScrollBar:vertical { background: transparent; width: 10px; margin: 2px; }

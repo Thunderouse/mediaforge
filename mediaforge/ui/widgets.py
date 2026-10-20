@@ -287,6 +287,7 @@ class JobRow(QFrame):
 
     targetChanged = Signal(str, str)   # job_id, target_key
     removeRequested = Signal(str)
+    activated = Signal(str)            # двойной клик — открыть предпросмотр
 
     def __init__(self, job: Job, parent=None):
         super().__init__(parent)
@@ -454,6 +455,9 @@ class JobRow(QFrame):
         self.update()
 
     # ------------------------------------------------------------------ #
+    def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802
+        self.activated.emit(self.job.id)
+
     def enterEvent(self, event) -> None:  # noqa: N802
         self._hover = True
         self.update()

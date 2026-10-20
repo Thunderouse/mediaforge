@@ -13,7 +13,8 @@ from PySide6.QtGui import (QColor, QIcon, QLinearGradient,
 from PySide6.QtWidgets import (QApplication, QComboBox, QFileDialog,
                                QFrame, QGridLayout, QHBoxLayout, QLabel,
                                QLineEdit, QMainWindow, QMessageBox, QPushButton,
-                               QScrollArea, QSizePolicy, QVBoxLayout, QWidget)
+                               QScrollArea, QSizePolicy, QStackedWidget,
+                               QVBoxLayout, QWidget)
 
 from ..core import formats as fm
 from ..core.config import APP_NAME, APP_VERSION, Settings
@@ -24,6 +25,7 @@ from ..core.ffmpeg import (AUDIO_EXT, IMAGE_EXT, VIDEO_EXT,
                            iter_media_files, probe)
 from ..core.timecode import format_timecode, parse_timecode
 from . import icons, theme
+from .preview import PreviewPanel
 from .widgets import (CheckBox, Combo, DropZone, IconButton, JobRow,
                       ProgressLine, Segmented)
 
@@ -93,7 +95,15 @@ class MainWindow(QMainWindow):
         outer.setSpacing(0)
 
         outer.addWidget(self._build_header())
-        outer.addWidget(self._build_body(), 1)
+
+        self.stack = QStackedWidget()
+        self.stack.addWidget(self._build_body())
+        self.preview = PreviewPanel(self.tools)
+        self.preview.trimChanged.connect(self._on_preview_trim)
+        self.preview.jobSelected.connect(self._open_preview_for)
+        self.stack.addWidget(self.preview)
+        outer.addWidget(self.stack, 1)
+
         outer.addWidget(self._build_footer())
         self.progress_line = ProgressLine(root)
         outer.addWidget(self.progress_line)
@@ -144,6 +154,13 @@ class MainWindow(QMainWindow):
         titles.addWidget(t2)
         lay.addLayout(titles)
         lay.addStretch(1)
+
+        self.view_switch = Segmented((("convert", "Конвертер"),
+                                      ("preview", "Предпросмотр")))
+        self.view_switch.setFixedWidth(232)
+        self.view_switch.changed.connect(
+            lambda key: self.stack.setCurrentIndex(0 if key == "convert" else 1))
+        lay.addWidget(self.view_switch)
 
         self.theme_switch = QFrame(header)
         self.theme_switch.setObjectName("segWrap")
@@ -628,6 +645,7 @@ class MainWindow(QMainWindow):
             row = JobRow(job, self)
             row.set_trim(float(self.settings.get("opt_trim_start", 0.0) or 0.0),
                          float(self.settings.get("opt_trim_end", 0.0) or 0.0))
+            row.activated.connect(self._open_preview_for)
             row.targetChanged.connect(self._on_row_target)
             row.removeRequested.connect(self._remove_row)
             self.list_lay.insertWidget(self.list_lay.count() - 1, row)
@@ -728,6 +746,8 @@ class MainWindow(QMainWindow):
         self.btn_clear.setEnabled(has)
         self._update_option_visibility()
         self._update_summary()
+        if hasattr(self, "preview"):
+            self.preview.set_jobs(self.jobs)
 
     def _update_option_visibility(self) -> None:
         has_media = any(j.info.kind in ("video", "audio") for j in self.jobs)
@@ -795,19 +815,45 @@ class MainWindow(QMainWindow):
         return start, end
 
     def _on_trim_edited(self, _text: str = "") -> None:
-        ok = True
+        """Пользователь правит поля в сайдбаре."""
         try:
             start, end = self._read_trim()
         except ValueError:
-            ok = False
-            start = end = 0.0
-        style = "" if ok else f"border-color: {theme.current()['danger']};"
-        for edit in (self.edit_trim_start, self.edit_trim_end):
-            edit.setStyleSheet(style)
-        if not ok:
-            self.trim_title.setText("Фрагмент · проверьте время")
-            self.trim_title.setStyleSheet(f"color: {theme.current()['danger']};")
+            self._set_trim_state(None)
             return
+        self._apply_trim(start, end, from_preview=False)
+
+    def _on_preview_trim(self, start: float, end: float) -> None:
+        """Фрагмент выставлен ручками на полоске кадров."""
+        self._apply_trim(start, end, from_preview=True)
+
+    def _apply_trim(self, start: float, end: float, from_preview: bool) -> None:
+        self._set_trim_state((start, end))
+        self.settings.set("opt_trim_start", start)
+        self.settings.set("opt_trim_end", end)
+        if from_preview:
+            for edit, value in ((self.edit_trim_start, start),
+                                (self.edit_trim_end, end)):
+                edit.blockSignals(True)
+                edit.setText(format_timecode(value) if value else "")
+                edit.blockSignals(False)
+        elif hasattr(self, "preview"):
+            self.preview.apply_trim(start, end)
+        for row in self.rows.values():
+            row.set_trim(start, end)
+
+    def _set_trim_state(self, values: tuple[float, float] | None) -> None:
+        danger = theme.current()["danger"]
+        muted = theme.current()["muted"]
+        if values is None:
+            for edit in (self.edit_trim_start, self.edit_trim_end):
+                edit.setStyleSheet(f"border-color: {danger};")
+            self.trim_title.setText("Фрагмент · проверьте время")
+            self.trim_title.setStyleSheet(f"color: {danger};")
+            return
+        for edit in (self.edit_trim_start, self.edit_trim_end):
+            edit.setStyleSheet("")
+        start, end = values
         if not start and not end:
             self.trim_title.setText("Фрагмент · весь файл")
         else:
@@ -815,11 +861,16 @@ class MainWindow(QMainWindow):
             length = f" · {end - start:.1f} с" if end else ""
             self.trim_title.setText(
                 f"Фрагмент · {format_timecode(start)} {tail}{length}")
-        self.trim_title.setStyleSheet(f"color: {theme.current()['muted']}; font-size: 11px; font-weight: 600;")
-        self.settings.set("opt_trim_start", start)
-        self.settings.set("opt_trim_end", end)
-        for row in self.rows.values():
-            row.set_trim(start, end)
+        self.trim_title.setStyleSheet(
+            f"color: {muted}; font-size: 11px; font-weight: 600;")
+
+    def _show_view(self, index: int) -> None:
+        self.stack.setCurrentIndex(index)
+        self.view_switch.setValue("preview" if index else "convert")
+
+    def _open_preview_for(self, job_id: str) -> None:
+        self._show_view(1)
+        self.preview.select_job(job_id)
 
     def _pick_out_dir(self) -> None:
         start = self.edit_out.text() or str(Path.home())

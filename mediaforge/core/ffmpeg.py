@@ -212,6 +212,11 @@ class MediaInfo:
         return human_duration(self.duration)
 
     @property
+    def kind_label(self) -> str:
+        return {"image": "картинка", "video": "видео", "audio": "звук"}.get(
+            self.kind, "файл")
+
+    @property
     def resolution_label(self) -> str:
         if self.width and self.height:
             return f"{self.width}×{self.height}"
