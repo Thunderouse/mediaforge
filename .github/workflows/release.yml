@@ -90,8 +90,9 @@ jobs:
       - name: архив
         run: |
           mkdir -p out
+          version=$(python tools/version.py)
           ditto -c -k --sequesterRsrc --keepParent dist/MediaForge.app \
-            "out/MediaForge-macos-arm64.zip"
+            "out/MediaForge-${version}-macos-arm64.zip"
           ls -lh out
 
       - uses: actions/upload-artifact@v4
