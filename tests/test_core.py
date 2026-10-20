@@ -1,0 +1,239 @@
+"""Тесты ядра MediaForge (GUI не требуется).
+
+    python -m pytest            # всё
+    python -m pytest -k image   # только изображения
+"""
+
+from __future__ import annotations
+
+import shutil
+import subprocess
+from pathlib import Path
+
+import pytest
+
+from mediaforge.core import formats as fm
+from mediaforge.core.convert import (ConvertError, build_audio_cmd, build_gif_cmd,
+                                     convert_file, unique_path)
+from mediaforge.core.ffmpeg import (Tools, human_duration, human_size,
+                                   iter_media_files, probe)
+
+FFMPEG = shutil.which("ffmpeg")
+needs_ffmpeg = pytest.mark.skipif(not FFMPEG, reason="нет ffmpeg в системе")
+
+
+@pytest.fixture(scope="session")
+def tools() -> Tools:
+    if not FFMPEG:
+        pytest.skip("нет ffmpeg")
+    return Tools.locate()
+
+
+@pytest.fixture(scope="session")
+def media(tmp_path_factory) -> dict[str, Path]:
+    """Готовит тестовые файлы: видео со звуком, беззвучное видео, картинки, wav."""
+    d = tmp_path_factory.mktemp("media")
+    out: dict[str, Path] = {}
+    if FFMPEG:
+        subprocess.run(
+            [FFMPEG, "-hide_banner", "-loglevel", "error", "-y",
+             "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=25",
+             "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
+             "-t", "2", "-c:v", "libx264", "-preset", "ultrafast",
+             "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", str(d / "clip.mp4")],
+            check=True,
+        )
+        subprocess.run(
+            [FFMPEG, "-hide_banner", "-loglevel", "error", "-y",
+             "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=25", "-t", "1",
+             "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-an",
+             str(d / "silent.mp4")],
+            check=True,
+        )
+        subprocess.run(
+            [FFMPEG, "-hide_banner", "-loglevel", "error", "-y",
+             "-f", "lavfi", "-i", "sine=frequency=220:duration=1", str(d / "tone.wav")],
+            check=True,
+        )
+        out["clip"] = d / "clip.mp4"
+        out["silent"] = d / "silent.mp4"
+        out["wav"] = d / "tone.wav"
+    try:
+        from PIL import Image
+        Image.new("RGBA", (160, 100), (30, 120, 240, 255)).save(d / "pic.png")
+        Image.new("RGB", (80, 60), (200, 40, 40)).save(d / "pic.jpg")
+        out["png"] = d / "pic.png"
+        out["jpg"] = d / "pic.jpg"
+    except ImportError:
+        pass
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# Реестр форматов
+# --------------------------------------------------------------------------- #
+def test_every_target_has_unique_ext():
+    for target in fm.ALL_TARGETS:
+        assert target.ext and "." not in target.ext
+        assert target.label
+
+
+def test_targets_for_kinds():
+    assert "webp" in {t.key for t in fm.targets_for("image")}
+    video_keys = {t.key for t in fm.targets_for("video")}
+    assert {"mp4", "gif", "mp3"} <= video_keys
+    assert "mp4" not in {t.key for t in fm.targets_for("audio")}
+
+
+def test_default_target_never_returns_missing():
+    for ext, kind in ((".png", "image"), (".mp4", "video"), (".flac", "audio")):
+        assert fm.default_target(ext, kind) in fm.BY_KEY
+
+
+# --------------------------------------------------------------------------- #
+# Утилиты
+# --------------------------------------------------------------------------- #
+def test_humanizers():
+    assert human_size(0) == "0 Б"
+    assert human_size(1536) == "1.5 КБ"
+    assert human_duration(0) == ""
+    assert human_duration(65) == "1:05"
+    assert human_duration(3725) == "1:02:05"
+
+
+def test_unique_path(tmp_path):
+    first = unique_path(tmp_path, "clip", "mp4")
+    assert first.name == "clip.mp4"
+    first.write_bytes(b"x")
+    assert unique_path(tmp_path, "clip", "mp4").name == "clip (1).mp4"
+    assert unique_path(tmp_path, "clip", "mp4", overwrite=True) == first
+
+
+def test_iter_media_files(tmp_path):
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "a.png").write_bytes(b"x")
+    (tmp_path / "sub" / "b.mp4").write_bytes(b"x")
+    (tmp_path / "note.txt").write_text("не медиа")
+    found = {p.name for p in iter_media_files([tmp_path], recursive=True)}
+    assert found == {"a.png", "b.mp4"}
+
+
+# --------------------------------------------------------------------------- #
+# Метаданные и конвертация
+# --------------------------------------------------------------------------- #
+@needs_ffmpeg
+def test_probe_video(tools, media):
+    info = probe(media["clip"], tools)
+    assert info.kind == "video"
+    assert info.has_video and info.has_audio
+    assert (info.width, info.height) == (320, 240)
+    assert 1.5 < info.duration < 3.0
+
+
+@needs_ffmpeg
+def test_probe_image(tools, media):
+    info = probe(media["png"], tools)
+    assert info.kind == "image"
+    assert info.resolution_label == "160×100"
+
+
+def test_image_conversion_chain(tmp_path, media):
+    pytest.importorskip("PIL")
+    if "png" not in media:
+        pytest.skip("нет тестовых картинок")
+    src = media["png"]
+    for key in ("webp", "jpg", "tiff", "bmp", "ico", "pdf", "avif"):
+        out = convert_file(src, fm.BY_KEY[key], fm.ConvertOptions(), None, tmp_path)  # type: ignore[arg-type]
+        assert out.output.exists() and out.output.stat().st_size > 0
+    # jpg из картинки с прозрачностью не должен падать
+    assert (tmp_path / "pic.jpg").exists()
+
+
+def test_image_resize_respects_long_edge(tmp_path, media):
+    pytest.importorskip("PIL")
+    from PIL import Image
+    if "png" not in media:
+        pytest.skip("нет тестовых картинок")
+    opts = fm.ConvertOptions(resolution="480")
+    big = tmp_path / "big.png"
+    Image.new("RGB", (1600, 800), (0, 0, 0)).save(big)
+    res = convert_file(big, fm.BY_KEY["png"], opts, None, tmp_path)  # type: ignore[arg-type]
+    with Image.open(res.output) as im:
+        assert max(im.size) == 480
+
+
+@needs_ffmpeg
+def test_video_to_mp4_and_webm(tools, media, tmp_path):
+    for key in ("mp4", "webm"):
+        res = convert_file(media["clip"], fm.BY_KEY[key], fm.ConvertOptions(quality="small"),
+                           tools, tmp_path)
+        info = probe(res.output, tools)
+        assert info.has_video
+        assert res.output.stat().st_size > 0
+
+
+@needs_ffmpeg
+def test_video_to_gif_has_frames(tools, media, tmp_path):
+    opts = fm.ConvertOptions(gif_fps="10", gif_width="160")
+    res = convert_file(media["clip"], fm.BY_KEY["gif"], opts, tools, tmp_path)
+    info = probe(res.output, tools)
+    assert res.output.suffix == ".gif"
+    assert info.kind in ("image", "video")
+    assert res.output.stat().st_size > 1000
+
+
+@needs_ffmpeg
+def test_audio_extraction(tools, media, tmp_path):
+    for key in ("mp3", "wav", "flac", "m4a"):
+        res = convert_file(media["clip"], fm.BY_KEY[key], fm.ConvertOptions(), tools, tmp_path)
+        info = probe(res.output, tools)
+        assert info.has_audio and not info.has_video
+
+
+@needs_ffmpeg
+def test_audio_extraction_without_track_fails(tools, media, tmp_path):
+    with pytest.raises(ConvertError):
+        convert_file(media["silent"], fm.BY_KEY["mp3"], fm.ConvertOptions(), tools, tmp_path)
+
+
+@needs_ffmpeg
+def test_cancel_stops_conversion(tools, media, tmp_path):
+    import threading
+    cancel = threading.Event()
+    cancel.set()
+    with pytest.raises(Exception):
+        convert_file(media["clip"], fm.BY_KEY["mkv"], fm.ConvertOptions(), tools, tmp_path,
+                     cancel=cancel)
+
+
+# --------------------------------------------------------------------------- #
+# Сборка команд
+# --------------------------------------------------------------------------- #
+def test_gif_command_uses_two_pass_palette(tools, media):
+    info = probe(media["clip"], tools) if "clip" in media else None
+    if info is None:
+        pytest.skip("нет тестового видео")
+    cmd = build_gif_cmd(media["clip"], Path("out.gif"), info,
+                        fm.ConvertOptions(gif_fps="12", gif_width="480"), tools)
+    joined = " ".join(cmd)
+    assert "palettegen" in joined and "paletteuse" in joined
+    assert "fps=12" in joined and "scale=480" in joined
+
+
+def test_audio_command_maps_only_audio(tools, media):
+    info = probe(media["wav"], tools) if "wav" in media else None
+    if info is None:
+        pytest.skip("нет тестового аудио")
+    cmd = build_audio_cmd(media["wav"], Path("out.mp3"), info, fm.BY_KEY["mp3"],
+                          fm.ConvertOptions(audio_bitrate="256k"), tools)
+    joined = " ".join(cmd)
+    assert "-vn" in joined and "libmp3lame" in joined and "256k" in joined
+
+
+def test_gentle_mode_limits_threads(tools, media):
+    if "clip" not in media:
+        pytest.skip("нет тестового видео")
+    info = probe(media["clip"], tools)
+    cmd = build_audio_cmd(media["clip"], Path("o.mp3"), info, fm.BY_KEY["mp3"],
+                          fm.ConvertOptions(gentle=True), tools)
+    assert "-threads" in cmd

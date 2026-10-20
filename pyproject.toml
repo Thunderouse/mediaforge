@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mediaforge"
+version = "1.0.0"
+description = "Универсальный медиаконвертер: видео, изображения, GIF и извлечение звука"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "MediaForge" }]
+keywords = ["ffmpeg", "converter", "video", "image", "gif", "audio", "qt"]
+dependencies = [
+    "PySide6-Essentials>=6.5",
+    "Pillow>=10.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pyinstaller>=6.3"]
+build = ["pyinstaller>=6.3"]
+
+[project.gui-scripts]
+mediaforge = "mediaforge.app:main"
+
+[project.scripts]
+mediaforge-cli = "mediaforge.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["mediaforge*"]
+
+[tool.setuptools.package-data]
+mediaforge = ["assets/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
