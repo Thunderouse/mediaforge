@@ -99,6 +99,19 @@ RESOLUTIONS = (
 GIF_FPS = ("10", "12", "15", "20", "25", "30")
 AUDIO_BITRATES = ("96k", "128k", "160k", "192k", "256k", "320k")
 
+# масштаб изображений
+IMAGE_SCALES = (
+    ("none", "Не менять"),
+    ("percent", "Проценты"),
+    ("size", "Ширина и высота"),
+)
+IMAGE_PERCENTS = ("25", "50", "75", "125", "150", "200", "300", "400")
+IMAGE_FILTERS = (
+    ("lanczos", "Lanczos · лучшее"),
+    ("bicubic", "Бикубический"),
+    ("nearest", "Ближайший · пиксель-арт"),
+)
+
 
 @dataclass
 class ConvertOptions:
@@ -113,6 +126,13 @@ class ConvertOptions:
     overwrite: bool = False
     trim_start: float = 0.0   # секунды от начала; 0 — с начала
     trim_end: float = 0.0     # секунды; 0 — до конца файла
+    image_scale: str = "none"      # none | percent | size
+    image_percent: str = "150"
+    image_width: str = ""
+    image_height: str = ""
+    image_keep_ratio: bool = True
+    image_allow_upscale: bool = False
+    image_filter: str = "lanczos"  # lanczos | bicubic | nearest
 
     def copy(self, **changes) -> "ConvertOptions":
         return replace(self, **changes)

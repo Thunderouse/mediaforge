@@ -14,8 +14,8 @@ import pytest
 
 from mediaforge.core import formats as fm
 from mediaforge.core.convert import (ConvertError, build_audio_cmd, build_gif_cmd,
-                                     build_video_cmd, convert_file, trim_plan,
-                                     unique_path)
+                                     build_video_cmd, convert_file,
+                                     target_image_size, trim_plan, unique_path)
 from mediaforge.core import preview as pv
 from mediaforge.core.timecode import format_timecode, parse_timecode
 from mediaforge.core.ffmpeg import (MediaInfo, Tools, human_duration, human_size,
@@ -407,3 +407,72 @@ def test_frame_stream_returns_even_rgb_frames(tools, media):
     finally:
         proc.kill()
         proc.wait(timeout=5)
+
+
+# --------------------------------------------------------------------------- #
+# Масштаб изображений и апскейл
+# --------------------------------------------------------------------------- #
+def test_target_size_percent_respects_upscale_flag():
+    size = (1280, 800)
+    assert target_image_size(size, fm.ConvertOptions()) == size
+    assert target_image_size(size, fm.ConvertOptions(
+        image_scale="percent", image_percent="50")) == (640, 400)
+    # без разрешения увеличения процент упирается в 100
+    assert target_image_size(size, fm.ConvertOptions(
+        image_scale="percent", image_percent="200")) == size
+    assert target_image_size(size, fm.ConvertOptions(
+        image_scale="percent", image_percent="200",
+        image_allow_upscale=True)) == (2560, 1600)
+
+
+def test_target_size_explicit_dimensions():
+    size = (1280, 800)
+    fit = fm.ConvertOptions(image_scale="size", image_width="400", image_height="400")
+    assert target_image_size(size, fit) == (400, 250)
+    stretch = fm.ConvertOptions(image_scale="size", image_width="300",
+                                image_height="150", image_keep_ratio=False)
+    assert target_image_size(size, stretch) == (300, 150)
+    only_width = fm.ConvertOptions(image_scale="size", image_width="320")
+    assert target_image_size(size, only_width) == (320, 200)
+    # без апскейла явный размер не может быть больше исходного
+    assert target_image_size(size, fm.ConvertOptions(
+        image_scale="size", image_width="2000", image_height="2000")) == size
+
+
+def test_target_size_resolution_and_upscale():
+    # для картинок «Разрешение» ограничивает длинную сторону (у видео — высоту)
+    assert target_image_size((1920, 1080), fm.ConvertOptions(resolution="720")) == (720, 405)
+    # картинку меньше целевого разрешения апскейлим только по флажку
+    assert target_image_size((320, 200), fm.ConvertOptions(resolution="1080")) == (320, 200)
+    assert target_image_size((320, 200), fm.ConvertOptions(
+        resolution="1080", image_allow_upscale=True)) == (1080, 675)
+
+
+def test_target_size_validation():
+    with pytest.raises(ConvertError):
+        target_image_size((100, 100), fm.ConvertOptions(image_scale="size"))
+    with pytest.raises(ConvertError):
+        target_image_size((100, 100), fm.ConvertOptions(
+            image_scale="percent", image_percent="0"))
+
+
+def test_image_upscale_writes_bigger_file(tmp_path, media):
+    from PIL import Image
+
+    pytest.importorskip("PIL")
+    opts = fm.ConvertOptions(image_scale="percent", image_percent="200",
+                             image_allow_upscale=True, image_filter="lanczos")
+    res = convert_file(media["png"], fm.BY_KEY["png"], opts, None, tmp_path)
+    with Image.open(res.output) as im:
+        assert im.size == (320, 200)
+
+
+def test_image_explicit_size_with_nearest(tmp_path, media):
+    from PIL import Image
+
+    pytest.importorskip("PIL")
+    opts = fm.ConvertOptions(image_scale="size", image_width="64", image_height="64",
+                             image_keep_ratio=False, image_filter="nearest")
+    res = convert_file(media["png"], fm.BY_KEY["png"], opts, None, tmp_path)
+    with Image.open(res.output) as im:
+        assert im.size == (64, 64)

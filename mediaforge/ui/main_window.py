@@ -347,6 +347,72 @@ class MainWindow(QMainWindow):
             lambda: self._set_opt("resolution", self.cmb_resolution.currentData()))
         lay.addWidget(self.cmb_resolution)
 
+        # --- изображения ---
+        self.image_box = QWidget()
+        il = QVBoxLayout(self.image_box)
+        il.setContentsMargins(0, 4, 0, 0)
+        il.setSpacing(6)
+        il.addWidget(self._divider())
+        il.addWidget(self._section("Изображения"))
+        il.addWidget(self._field_label("Размер"))
+
+        self.cmb_image_scale = Combo()
+        self.cmb_image_scale.addItem("Не менять", None)
+        for percent in fm.IMAGE_PERCENTS:
+            self.cmb_image_scale.addItem(f"{percent} %", percent)
+        self.cmb_image_scale.addItem("Свой размер…", "custom")
+        current = (opts.image_percent if opts.image_scale == "percent"
+                   else "custom" if opts.image_scale == "size" else None)
+        index = self.cmb_image_scale.findData(current)
+        self.cmb_image_scale.setCurrentIndex(index if index >= 0 else 0)
+        self.cmb_image_scale.currentIndexChanged.connect(self._on_image_scale)
+        il.addWidget(self.cmb_image_scale)
+
+        self.image_size_row = QWidget()
+        rl = QHBoxLayout(self.image_size_row)
+        rl.setContentsMargins(0, 0, 0, 0)
+        rl.setSpacing(6)
+        self.edit_img_w = QLineEdit(str(opts.image_width or ""))
+        self.edit_img_w.setPlaceholderText("ширина")
+        self.edit_img_h = QLineEdit(str(opts.image_height or ""))
+        self.edit_img_h.setPlaceholderText("высота")
+        validator = QRegularExpressionValidator(QRegularExpression(r"^[0-9]{0,5}$"))
+        for edit in (self.edit_img_w, self.edit_img_h):
+            edit.setValidator(validator)
+            edit.textChanged.connect(self._on_image_size_edited)
+        times = QLabel("×")
+        times.setFixedWidth(12)
+        times.setAlignment(Qt.AlignCenter)
+        rl.addWidget(self.edit_img_w, 1)
+        rl.addWidget(times)
+        rl.addWidget(self.edit_img_h, 1)
+        il.addWidget(self.image_size_row)
+
+        self.chk_ratio = CheckBox("Сохранять пропорции")
+        self.chk_ratio.setChecked(opts.image_keep_ratio)
+        self.chk_ratio.toggled.connect(lambda v: self._set_opt("image_keep_ratio", v))
+        il.addWidget(self.chk_ratio)
+
+        il.addWidget(self._field_label("Метод"))
+        self.cmb_image_filter = Combo()
+        self._fill(self.cmb_image_filter, fm.IMAGE_FILTERS, opts.image_filter)
+        self.cmb_image_filter.currentIndexChanged.connect(
+            lambda: self._set_opt("image_filter", self.cmb_image_filter.currentData()))
+        il.addWidget(self.cmb_image_filter)
+
+        self.chk_upscale = CheckBox("Разрешить увеличение")
+        self.chk_upscale.setChecked(opts.image_allow_upscale)
+        self.chk_upscale.setToolTip(
+            "Без этого флажка масштаб и «Разрешение» только уменьшают картинку")
+        self.chk_upscale.toggled.connect(lambda v: self._set_opt("image_allow_upscale", v))
+        il.addWidget(self.chk_upscale)
+
+        upscale_hint = QLabel("«Разрешение» ограничивает длинную сторону")
+        upscale_hint.setObjectName("hint")
+        upscale_hint.setWordWrap(True)
+        il.addWidget(upscale_hint)
+        lay.addWidget(self.image_box)
+
         # --- фрагмент ---
         self.trim_box = QWidget()
         tl = QVBoxLayout(self.trim_box)
@@ -468,6 +534,7 @@ class MainWindow(QMainWindow):
         row.addWidget(self.btn_browse)
         lay.addLayout(row)
         self._on_source_dir_toggled(self.chk_source_dir.isChecked())
+        self._update_image_widgets()
 
         lay.addStretch(1)
         scroll.setWidget(inner)
@@ -752,6 +819,7 @@ class MainWindow(QMainWindow):
     def _update_option_visibility(self) -> None:
         has_media = any(j.info.kind in ("video", "audio") for j in self.jobs)
         self.trim_box.setVisible(has_media)
+        self.image_box.setVisible(any(j.info.kind == "image" for j in self.jobs))
         has_gif = any(j.target.key.startswith("gif") for j in self.jobs)
         has_audio = any(j.target.kind == fm.KIND_AUDIO for j in self.jobs)
         self.gif_box.setVisible(has_gif)
@@ -871,6 +939,26 @@ class MainWindow(QMainWindow):
     def _open_preview_for(self, job_id: str) -> None:
         self._show_view(1)
         self.preview.select_job(job_id)
+
+    def _on_image_scale(self) -> None:
+        data = self.cmb_image_scale.currentData()
+        if data is None:
+            self._set_opt("image_scale", "none")
+        elif data == "custom":
+            self._set_opt("image_scale", "size")
+        else:
+            self._set_opt("image_scale", "percent")
+            self._set_opt("image_percent", data)
+        self._update_image_widgets()
+
+    def _on_image_size_edited(self, _text: str = "") -> None:
+        self._set_opt("image_width", self.edit_img_w.text().strip())
+        self._set_opt("image_height", self.edit_img_h.text().strip())
+
+    def _update_image_widgets(self) -> None:
+        mode = self.cmb_image_scale.currentData()
+        self.image_size_row.setVisible(mode == "custom")
+        self.chk_ratio.setVisible(mode == "custom")
 
     def _pick_out_dir(self) -> None:
         start = self.edit_out.text() or str(Path.home())

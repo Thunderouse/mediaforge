@@ -33,6 +33,69 @@ _AUDIO_CODECS = {
     "ogg": ("libvorbis", "ogg"),
 }
 
+def _int_or_zero(value) -> int:
+    try:
+        return max(0, int(str(value).strip()))
+    except (TypeError, ValueError):
+        return 0
+
+
+def target_image_size(size: tuple[int, int], opts: fm.ConvertOptions) -> tuple[int, int]:
+    """Итоговый размер картинки: «Разрешение» (ограничение по длинной стороне),
+    затем явный масштаб (проценты или ширина×высота).
+
+    Увеличение разрешено только при `image_allow_upscale`, иначе масштаб
+    упирается в исходный размер — чтобы «1080p» не растягивал маленькие фото.
+    """
+    width, height = size
+    if width <= 0 or height <= 0:
+        return max(1, width), max(1, height)
+
+    max_edge = _IMG_MAX_EDGE.get(opts.resolution)
+    if max_edge:
+        longest = max(width, height)
+        if longest > max_edge:
+            k = max_edge / longest
+            width, height = max(1, round(width * k)), max(1, round(height * k))
+        elif opts.image_allow_upscale and longest < max_edge:
+            k = max_edge / longest
+            width, height = max(1, round(width * k)), max(1, round(height * k))
+
+    if opts.image_scale == "percent":
+        try:
+            percent = float(str(opts.image_percent).replace(",", ".").strip())
+        except (TypeError, ValueError):
+            raise ConvertError("Некорректный процент масштаба") from None
+        if percent <= 0:
+            raise ConvertError("Процент масштаба должен быть больше нуля")
+        if percent > 100 and not opts.image_allow_upscale:
+            percent = 100.0
+        k = percent / 100.0
+        width, height = max(1, round(width * k)), max(1, round(height * k))
+    elif opts.image_scale == "size":
+        target_w = _int_or_zero(opts.image_width)
+        target_h = _int_or_zero(opts.image_height)
+        if not target_w and not target_h:
+            raise ConvertError("Укажите ширину и/или высоту для масштабирования")
+        if opts.image_keep_ratio:
+            if target_w and target_h:
+                k = min(target_w / width, target_h / height)
+            elif target_w:
+                k = target_w / width
+            else:
+                k = target_h / height
+            if k > 1 and not opts.image_allow_upscale:
+                k = 1.0
+            width, height = max(1, round(width * k)), max(1, round(height * k))
+        else:
+            new_w = target_w or width
+            new_h = target_h or height
+            if not opts.image_allow_upscale:
+                new_w, new_h = min(new_w, width), min(new_h, height)
+            width, height = max(1, new_w), max(1, new_h)
+    return width, height
+
+
 _IMG_QUALITY = {
     # (jpeg/webp/avif quality, png compress level)
     "high": (95, 9),
@@ -261,9 +324,14 @@ def _convert_image_pillow(
     quality, level = _IMG_QUALITY[opts.quality]
     with Image.open(src) as im:
         im = ImageOps.exif_transpose(im)
-        max_edge = _IMG_MAX_EDGE.get(opts.resolution)
-        if max_edge and max(im.size) > max_edge:
-            im.thumbnail((max_edge, max_edge), Image.LANCZOS)
+        new_size = target_image_size(im.size, opts)
+        if new_size != im.size:
+            resample = {
+                "lanczos": Image.LANCZOS,
+                "bicubic": Image.BICUBIC,
+                "nearest": Image.NEAREST,
+            }.get(opts.image_filter, Image.LANCZOS)
+            im = im.resize(new_size, resample)
 
         key = target.key
         params: dict = {}
@@ -313,12 +381,17 @@ def _convert_image_pillow(
 
 def _convert_image_ffmpeg(
     src: Path, dst: Path, target: fm.Target, opts: fm.ConvertOptions, tools: Tools,
+    info: MediaInfo | None = None,
 ) -> None:
     quality, _ = _IMG_QUALITY[opts.quality]
-    max_edge = _IMG_MAX_EDGE.get(opts.resolution)
+    info = info or probe(src, tools)
+    info_size = (info.width or 0, info.height or 0)
+    target = target_image_size(info_size, opts) if all(info_size) else info_size
+    flags = {"lanczos": "lanczos", "bicubic": "bicubic", "nearest": "neighbor"}.get(
+        opts.image_filter, "lanczos")
     vf = []
-    if max_edge:
-        vf = ["-vf", f"scale='min({max_edge},iw)':'min({max_edge},ih)':force_original_aspect_ratio=decrease"]
+    if target and all(info_size) and target != info_size:
+        vf = ["-vf", f"scale={target[0]}:{target[1]}:flags={flags}"]
     cmd = [tools.ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
            "-i", str(src), "-frames:v", "1"]
     if target.key == "avif":
@@ -395,7 +468,7 @@ def convert_file(
             except ImportError:
                 if tools is None:
                     raise ConvertError("Для этого формата нужен ffmpeg или Pillow")
-                _convert_image_ffmpeg(src, dst, target, opts, tools)
+                _convert_image_ffmpeg(src, dst, target, opts, tools, info)
             if on_progress:
                 on_progress(1.0, "")
         elif target.key == "gif":
