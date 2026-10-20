@@ -111,11 +111,15 @@ jobs:
       - name: gh release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
         run: |
           set -e
-          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
-            && gh release upload "$GITHUB_REF_NAME" dist/* --clobber \
-            || gh release create "$GITHUB_REF_NAME" dist/* \
-                 --title "MediaForge $GITHUB_REF_NAME" --generate-notes
-          gh release view "$GITHUB_REF_NAME" --json assets \
+          # gh не в git-репозитории (нет checkout) — репозиторий задаём явно
+          if gh release view "$GITHUB_REF_NAME" -R "$REPO" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/* -R "$REPO" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* -R "$REPO" \
+              --title "MediaForge $GITHUB_REF_NAME" --generate-notes
+          fi
+          gh release view "$GITHUB_REF_NAME" -R "$REPO" --json assets \
             --jq '.assets[] | "\(.name) \(.size)"'
