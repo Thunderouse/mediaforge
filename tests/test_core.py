@@ -1443,6 +1443,20 @@ def test_static_gif_without_ffprobe_stays_image(tools, tmp_path):
 # --------------------------------------------------------------------------- #
 # Отмена без строк прогресса
 # --------------------------------------------------------------------------- #
+def _process_gone(pid: int) -> bool:
+    """Кросс-платформенная проверка: на Windows os.kill(pid, 0) не работает."""
+    if os.name == "nt":
+        # процесс уже пожат proc.wait() внутри _kill
+        return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False
+    return False
+
+
 _SILENT_CHILD = r"""
 import os, sys, time
 pid_file, delay = sys.argv[1], float(sys.argv[2])
@@ -1472,8 +1486,7 @@ def test_cancel_while_child_is_silent(tmp_path):
     pid = int(pid_file.read_text() or 0)
     assert pid
     time.sleep(0.2)
-    with pytest.raises(ProcessLookupError):
-        os.kill(pid, 0)          # процесс убит, сирот нет
+    assert _process_gone(pid), "процесс остался сиротой"
 
 
 def test_silent_child_success_is_not_broken(tmp_path):
