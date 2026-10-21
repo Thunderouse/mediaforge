@@ -10,8 +10,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import re
+
 from PySide6.QtCore import QRegularExpression, Qt, Signal
-from PySide6.QtGui import QRegularExpressionValidator
+from PySide6.QtGui import QRegularExpressionValidator, QValidator
 from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
@@ -33,6 +35,31 @@ from . import theme
 from .widgets import CheckBox, Combo, IconButton, Segmented
 
 
+# то, что ещё можно допечатать до корректного времени: «1:», «1:3», «1:30.»
+_TC_PREFIX = re.compile(r"^\s*\d{0,3}(?::\d{0,2}){0,2}(?:[.,]\d{0,3})?\s*$")
+
+
+class TimecodeValidator(QValidator):
+    """Пропускает ровно то, что умеет разобрать parse_timecode.
+
+    Acceptable ставим только если разбор уже удался: иначе в поле попадали
+    строки вроде «1:2:3:4», которые валидатор считал допустимыми, а read_trim
+    потом падал с ValueError.
+    """
+
+    def validate(self, text: str, pos: int):  # noqa: N802
+        if not text.strip():
+            return QValidator.Intermediate, text, pos
+        try:
+            parse_timecode(text)
+        except ValueError:
+            if _TC_PREFIX.match(text):
+                # недописанное или «1:75» — пусть дописывает, подсветим ошибку
+                return QValidator.Intermediate, text, pos
+            return QValidator.Invalid, text, pos
+        return QValidator.Acceptable, text, pos
+
+
 class OptionsSidebar(QFrame):
     """Блок параметров: качество, разрешение, изображения, фрагмент, GIF, звук."""
 
@@ -51,6 +78,7 @@ class OptionsSidebar(QFrame):
         super().__init__(parent)
         self.settings = settings
         self._image_source: tuple[int, int] | None = None
+        self._trim_values: tuple[float, float] | None = (0.0, 0.0)
         self.setObjectName("sidebar")
         self.setFixedWidth(320)
 
@@ -164,14 +192,14 @@ class OptionsSidebar(QFrame):
         tl.addWidget(self.trim_title)
         trim_row = QHBoxLayout()
         trim_row.setSpacing(8)
-        pattern = QRegularExpression(r"^[0-9]{0,3}([:.,][0-9]{0,3}){0,3}$")
+        timecode_validator = TimecodeValidator(self)
         for caption, layout_attr, value in (("С начала", "edit_trim_start", opts.trim_start),
                                            ("По", "edit_trim_end", opts.trim_end)):
             col = QVBoxLayout()
             col.setSpacing(4)
             col.addWidget(self._field_label(caption))
             edit = QLineEdit(format_timecode(value) if value else "")
-            edit.setValidator(QRegularExpressionValidator(pattern, edit))
+            edit.setValidator(timecode_validator)
             edit.setPlaceholderText("0:00" if caption == "С начала" else "конец")
             edit.setClearButtonEnabled(True)
             edit.textChanged.connect(self._on_trim_edited)
@@ -278,6 +306,9 @@ class OptionsSidebar(QFrame):
         lay.addLayout(row)
         self._sync_out_dir_state()
         self._update_image_widgets()
+        # заголовок фрагмента сразу отражает сохранённые значения и живёт по теме
+        theme.bus.changed.connect(self._paint_trim_state)
+        self.apply_trim_state((opts.trim_start or 0.0, opts.trim_end or 0.0))
 
         lay.addStretch(1)
         scroll.setWidget(inner)
@@ -383,7 +414,13 @@ class OptionsSidebar(QFrame):
             edit.blockSignals(False)
 
     def apply_trim_state(self, values: tuple[float, float] | None) -> None:
-        """Оформление заголовка и полей фрагмента (None — время некорректно)."""
+        """Запоминает состояние фрагмента и перерисовывает заголовок."""
+        self._trim_values = values
+        self._paint_trim_state()
+
+    def _paint_trim_state(self) -> None:
+        """Оформление заголовка и полей по текущей теме (вызывается и из bus)."""
+        values = self._trim_values
         danger = theme.current()["danger"]
         muted = theme.current()["muted"]
         if values is None:
