@@ -1542,24 +1542,34 @@ def test_cancel_with_noisy_stderr_is_still_fast(media, tools, tmp_path):
 # --------------------------------------------------------------------------- #
 def test_save_is_debounced(tmp_path, monkeypatch):
     """Восемь изменений подряд — одна запись файла, и та после паузы."""
+    import types
+
+    import mediaforge.core.config as cfg_mod
+
     monkeypatch.setenv("MEDIAFORGE_CONFIG_DIR", str(tmp_path))
     settings = Settings()
 
     writes: list[str] = []
     real_replace = os.replace
 
-    def counting_replace(src, dst, *a, **kw):
+    def counting_replace(src, dst):
         writes.append(str(dst))
-        return real_replace(src, dst, *a, **kw)
+        return real_replace(src, dst)
 
-    monkeypatch.setattr("mediaforge.core.config.os.replace", counting_replace)
+    # подменяем os только внутри config: глобальный патч ломает соседние тесты
+    monkeypatch.setattr(cfg_mod, "os", types.SimpleNamespace(
+        environ=os.environ, name=os.name, replace=counting_replace))
 
     for i in range(8):
         settings.set("opt_image_width", str(1920 + i))
         settings.save()
     assert writes == [], "запись началась сразу, дебаунса нет"
 
-    time.sleep(0.6)
+    # ждём с запасом: на медленном раннере таймер может сработать позже
+    deadline = time.monotonic() + 5.0
+    while not writes and time.monotonic() < deadline:
+        time.sleep(0.02)
+    time.sleep(0.4)                      # дать шанс лишним записям
     assert len(writes) == 1, f"записей: {len(writes)}"
     data = json.loads(config_path().read_text(encoding="utf-8"))
     assert data["opt_image_width"] == "1927"
@@ -1611,6 +1621,7 @@ def test_unique_path_reserve_is_keyword_only(tmp_path):
 # GIF: память не зависит от длины (два прохода через файл палитры)
 # --------------------------------------------------------------------------- #
 @needs_ffmpeg
+@pytest.mark.skipif(os.name == "nt", reason="resource.getrusage — только POSIX")
 def test_gif_memory_stays_low(tmp_path):
     """Пик RSS дочернего ffmpeg при 30 с 720p -> 480p/15 — ниже 250 МБ."""
 

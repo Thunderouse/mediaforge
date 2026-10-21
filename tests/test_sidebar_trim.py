@@ -21,6 +21,11 @@ try:                       # на headless-машинах часто нет libE
     from mediaforge.ui import theme
     from mediaforge.ui.options_sidebar import OptionsSidebar, TimecodeValidator
 except ImportError as exc:  # noqa: BLE001
+    if os.environ.get("CI"):
+        raise RuntimeError(
+            f"UI-тесты не запускаются в CI: Qt недоступен ({exc}). "
+            "Проверьте установку PySide6-Essentials и системных библиотек."
+        ) from exc
     pytest.skip(f"Qt недоступен: {exc}", allow_module_level=True)
 
 
@@ -29,6 +34,8 @@ def qapp():
     try:
         app = QApplication.instance() or QApplication([])
     except Exception as exc:  # noqa: BLE001
+        if os.environ.get("CI"):
+            raise RuntimeError(f"UI-тесты не запускаются в CI: {exc}") from exc
         pytest.skip(f"Qt не поднимается: {exc}")
     yield app
 

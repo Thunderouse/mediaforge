@@ -23,6 +23,11 @@ try:                       # на headless-машинах часто нет libE
     from mediaforge.core import preview
     from mediaforge.core.config import Settings
 except ImportError as exc:  # noqa: BLE001
+    if os.environ.get("CI"):
+        raise RuntimeError(
+            f"UI-тесты не запускаются в CI: Qt недоступен ({exc}). "
+            "Проверьте установку PySide6-Essentials и системных библиотек."
+        ) from exc
     pytest.skip(f"Qt недоступен: {exc}", allow_module_level=True)
 
 
@@ -31,6 +36,8 @@ def qapp():
     try:
         app = QApplication.instance() or QApplication([])
     except Exception as exc:  # noqa: BLE001 — нет дисплея/библиотек
+        if os.environ.get("CI"):
+            raise RuntimeError(f"UI-тесты не запускаются в CI: {exc}") from exc
         pytest.skip(f"Qt не поднимается: {exc}")
     yield app
 

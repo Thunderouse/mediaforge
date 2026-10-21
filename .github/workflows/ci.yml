@@ -29,6 +29,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ffmpeg
 
+      - name: библиотеки Qt (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get install -y libegl1 libgl1 libxkbcommon-x11-0 \
+            libfontconfig1 libdbus-1-3 libxkbcommon0
+
       - name: ffmpeg (Windows)
         if: runner.os == 'Windows'
         run: choco install ffmpeg -y --no-progress
@@ -36,7 +42,7 @@ jobs:
       - name: зависимости
         run: |
           python -m pip install --upgrade pip
-          python -m pip install pillow pytest ruff
+          python -m pip install pillow pytest ruff PySide6-Essentials
 
       - name: линтер
         run: python -m ruff check --select F,E9 .
@@ -44,5 +50,15 @@ jobs:
       - name: синтаксис всех модулей
         run: python -m compileall -q mediaforge tools
 
-      - name: тесты ядра
-        run: python -m pytest -q
+      - name: тесты
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -m pytest -rs --no-header
+
+      # UI-тесты отдельным шагом: если Qt не поднялся, они падают (см. тесты),
+      # а не пропускаются молча
+      - name: UI-тесты
+        env:
+          QT_QPA_PLATFORM: offscreen
+          CI: "true"
+        run: python -m pytest -rs --no-header tests/test_ui_lifecycle.py tests/test_sidebar_trim.py
