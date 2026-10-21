@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Callable
 
 from . import formats as fm
+from .preview import CACHE_DIR as PREVIEW_CACHE
 from .ffmpeg import (Cancelled, ConvertError, MediaInfo, Tools, guess_kind, probe,
                      run_ffmpeg)
 from .timecode import format_timecode
@@ -260,19 +261,57 @@ def build_video_cmd(
     return cmd, note
 
 
-def build_gif_cmd(
-    src: Path, dst: Path, info: MediaInfo, opts: fm.ConvertOptions, tools: Tools,
+def _gif_trim(info: MediaInfo, opts: fm.ConvertOptions) -> tuple[list[str], float]:
+    """`-ss` и `-t` до `-i`: фрагмент читается сразу, без разбора начала файла.
+
+    Для GIF это принципиально: `-t` после `-i` не спасает память, потому что
+    фильтр всё равно получает кадры с начала.
+    """
+    pre, post, duration = trim_plan(info, opts)
+    return [*pre, *post], duration
+
+
+def palette_path() -> Path:
+    """Куда сложить палитру: кэш предпросмотра (его чистит preview.cleanup)."""
+    PREVIEW_CACHE.mkdir(parents=True, exist_ok=True)
+    return PREVIEW_CACHE / f"palette-{os.urandom(6).hex()}.png"
+
+
+def _gif_chain(info: MediaInfo, opts: fm.ConvertOptions) -> list[str]:
+    return [f"fps={int(opts.gif_fps or 15)}", *_scale_chain(info, opts)]
+
+
+def build_gif_palette_cmd(
+    src: Path, palette: Path, info: MediaInfo, opts: fm.ConvertOptions, tools: Tools,
 ) -> list[str]:
-    fps = int(opts.gif_fps or 15)
-    chain = [f"fps={fps}", *_scale_chain(info, opts)]
-    chain.append("split[s0][s1];[s0]palettegen=max_colors=256:stats_mode=diff[p];"
-                 "[s1][p]paletteuse=dither=sierra2_4a:diff_mode=rectangle")
-    vf = ",".join(chain)
-    trim_pre, trim_post, _ = trim_plan(info, opts)
+    """Первый проход: только палитра. Кадры в памяти не копятся."""
+    vf = ",".join([*_gif_chain(info, opts),
+                   "palettegen=max_colors=256:stats_mode=diff"])
+    trim, _ = _gif_trim(info, opts)
     return [
         tools.ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
-        "-progress", "pipe:1", *trim_pre, "-i", str(src), *trim_post,
-        "-an", "-sn", "-vf", vf, "-loop", "0" if opts.gif_loop else "-1",
+        "-progress", "pipe:1", *trim, "-i", str(src), "-an", "-sn",
+        "-vf", vf, *_threads(opts.gentle), str(palette),
+    ]
+
+
+def build_gif_cmd(
+    src: Path, dst: Path, info: MediaInfo, opts: fm.ConvertOptions, tools: Tools,
+    palette: Path,
+) -> list[str]:
+    """Второй проход: кодирование с готовой палитрой из файла.
+
+    Палитра подключена как второй вход, поэтому `paletteuse` не ждёт EOF и
+    не держит весь поток кадров.
+    """
+    graph = (f"[0:v]{','.join(_gif_chain(info, opts))}[x];"
+             "[x][1:v]paletteuse=dither=sierra2_4a:diff_mode=rectangle[out]")
+    trim, _ = _gif_trim(info, opts)
+    return [
+        tools.ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+        "-progress", "pipe:1", *trim, "-i", str(src), "-i", str(palette),
+        "-an", "-sn", "-filter_complex", graph, "-map", "[out]",
+        "-loop", "0" if opts.gif_loop else "-1",
         *_threads(opts.gentle), str(dst),
     ]
 
@@ -513,8 +552,26 @@ def convert_file(
         elif target.key == "gif":
             if tools is None:
                 raise ConvertError("Для видео нужен ffmpeg")
-            cmd = build_gif_cmd(src, tmp, info, opts, tools)
-            run_ffmpeg(cmd, effective_duration, on_progress, cancel)
+            # два прохода: палитра (0–10 %) и кодирование (10–100 %)
+            palette = palette_path()
+            try:
+                run_ffmpeg(
+                    build_gif_palette_cmd(src, palette, info, opts, tools),
+                    effective_duration,
+                    (lambda p, s: on_progress(0.10 * p, s)) if on_progress else None,
+                    cancel,
+                )
+                if on_progress:
+                    on_progress(0.10, "")
+                run_ffmpeg(
+                    build_gif_cmd(src, tmp, info, opts, tools, palette),
+                    effective_duration,
+                    (lambda p, s: on_progress(0.10 + 0.90 * p, s))
+                    if on_progress else None,
+                    cancel,
+                )
+            finally:
+                _cleanup(palette)     # временная палитра не должна оставаться
         elif target.kind == fm.KIND_AUDIO:
             if tools is None:
                 raise ConvertError("Для извлечения звука нужен ffmpeg")

@@ -30,6 +30,7 @@ from mediaforge.core.convert import (
     ConvertError,
     build_audio_cmd,
     build_gif_cmd,
+    build_gif_palette_cmd,
     build_video_cmd,
     convert_file,
     target_image_size,
@@ -247,14 +248,22 @@ def test_gif_command_uses_two_pass_palette(tools, media):
         pytest.skip("нет тестового видео")
     info = MediaInfo(path=media["clip"], kind="video", duration=2.0,
                      width=1920, height=1080, has_video=True, has_audio=True)
-    cmd = build_gif_cmd(media["clip"], Path("out.gif"), info,
-                        fm.ConvertOptions(gif_fps="12", resolution="480"), tools)
-    joined = " ".join(cmd)
-    assert "palettegen" in joined and "paletteuse" in joined
-    assert "fps=12" in joined
+    opts = fm.ConvertOptions(gif_fps="12", resolution="480")
+    palette = Path("palette.png")
+
+    first = " ".join(build_gif_palette_cmd(media["clip"], palette, info, opts, tools))
+    assert "palettegen" in first and "paletteuse" not in first
+    assert "fps=12" in first
     # масштаб GIF берётся из общего «Разрешения» — по высоте, с чётной шириной
-    assert "scale=-2:480" in joined
-    assert "scale=480:-1" not in joined
+    assert "scale=-2:480" in first
+    assert "scale=480:-1" not in first
+
+    second = " ".join(build_gif_cmd(media["clip"], Path("out.gif"), info, opts, tools, palette))
+    assert "paletteuse" in second and "palettegen" not in second
+    assert "split" not in second, "кадры снова копятся в одной команде"
+    assert "-i palette.png" in second
+    assert "fps=12" in second and "scale=-2:480" in second
+    assert second.count("-progress") == 1
 
 
 def test_gif_does_not_upscale(tools, media):
@@ -262,8 +271,8 @@ def test_gif_does_not_upscale(tools, media):
         pytest.skip("нет тестового видео")
     info = MediaInfo(path=media["clip"], kind="video", duration=2.0,
                      width=320, height=240, has_video=True)
-    cmd = build_gif_cmd(media["clip"], Path("out.gif"), info,
-                        fm.ConvertOptions(gif_fps="10", resolution="1080"), tools)
+    cmd = build_gif_palette_cmd(media["clip"], Path("p.png"), info,
+                                fm.ConvertOptions(gif_fps="10", resolution="1080"), tools)
     assert "scale=" not in " ".join(cmd)
 
 
@@ -365,7 +374,6 @@ def test_trim_args_in_commands(tools, media):
     info = probe(media["clip"], tools)
     opts = fm.ConvertOptions(trim_start=1.0, trim_end=2.0)
     for cmd in (
-        build_gif_cmd(media["clip"], Path("o.gif"), info, opts, tools),
         build_audio_cmd(media["clip"], Path("o.mp3"), info, fm.BY_KEY["mp3"], opts, tools),
         build_video_cmd(media["clip"], Path("o.mp4"), info, fm.BY_KEY["mp4"], opts, tools)[0],
     ):
@@ -373,6 +381,16 @@ def test_trim_args_in_commands(tools, media):
         # -ss должен стоять до -i, -t — после
         assert joined.index("-ss 1.000") < joined.index("-i ")
         assert "-t 1.000" in joined
+
+    # у GIF оба ключа — входные: иначе фильтр всё равно получает кадры с начала
+    gif_cmds = (
+        build_gif_palette_cmd(media["clip"], Path("p.png"), info, opts, tools),
+        build_gif_cmd(media["clip"], Path("o.gif"), info, opts, tools, Path("p.png")),
+    )
+    for cmd in gif_cmds:
+        joined = " ".join(cmd)
+        assert joined.index("-ss 1.000") < joined.index("-i ")
+        assert joined.index("-t 1.000") < joined.index("-i ")
 
 
 # --------------------------------------------------------------------------- #
@@ -1587,3 +1605,76 @@ def test_unique_path_reserve_is_keyword_only(tmp_path):
     with pytest.raises(TypeError):
         unique_path(tmp_path, "a", "ext", True, False)   # noqa: B026
     assert unique_path(tmp_path, "a", "ext", True, reserve=False) == tmp_path / "a.ext"
+
+
+# --------------------------------------------------------------------------- #
+# GIF: память не зависит от длины (два прохода через файл палитры)
+# --------------------------------------------------------------------------- #
+@needs_ffmpeg
+def test_gif_memory_stays_low(tmp_path):
+    """Пик RSS дочернего ffmpeg при 30 с 720p -> 480p/15 — ниже 250 МБ."""
+
+    src = tmp_path / "long.mp4"
+    subprocess.run(
+        [FFMPEG, "-hide_banner", "-loglevel", "error", "-y",
+         "-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=25", "-t", "30",
+         "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+         "-an", str(src)],
+        check=True, timeout=300,
+    )
+
+    repo = Path(__file__).resolve().parents[1]
+    script = (
+        "import resource, sys\n"
+        f"sys.path.insert(0, {str(repo)!r})\n"
+        "from pathlib import Path\n"
+        "from mediaforge.core import formats as fm\n"
+        "from mediaforge.core.convert import convert_file\n"
+        "from mediaforge.core.ffmpeg import Tools\n"
+        "src, out = Path(sys.argv[1]), Path(sys.argv[2])\n"
+        "out.mkdir(parents=True, exist_ok=True)\n"
+        "opts = fm.ConvertOptions(gif_fps='15', resolution='480')\n"
+        "res = convert_file(src, fm.BY_KEY['gif'], opts, Tools.locate(), out)\n"
+        "print(res.output.stat().st_size)\n"
+        "print(resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss)\n"
+    )
+    proc = subprocess.run([sys.executable, "-c", script, str(src), str(tmp_path / "out")],
+                          capture_output=True, text=True, timeout=900)
+    assert proc.returncode == 0, proc.stderr[-500:]
+    size, peak_kb = [int(x) for x in proc.stdout.split()]
+    peak_mb = peak_kb / 1024.0
+    assert size > 0
+    assert peak_mb < 250, f"пик RSS {peak_mb:.0f} МБ — кадры всё ещё копятся"
+
+
+def test_gif_palette_removed_on_both_paths(tmp_path, tools, media, monkeypatch):
+    """Временная палитра исчезает и при ошибке, и после успеха."""
+    out = tmp_path / "out"
+    out.mkdir()
+    made: list[Path] = []
+    import mediaforge.core.convert as conv
+
+    real_palette_path = conv.palette_path
+
+    def spy() -> Path:
+        path = real_palette_path()
+        made.append(path)
+        return path
+
+    monkeypatch.setattr(conv, "palette_path", spy)
+
+    convert_file(media["clip"], fm.BY_KEY["gif"], fm.ConvertOptions(gif_fps="10"),
+                 tools, out)
+    assert made and not any(p.exists() for p in made)
+    before = sorted(p.name for p in out.iterdir())
+    assert before == ["clip.gif"]
+
+    made.clear()
+    cancel = threading.Event()
+    cancel.set()
+    with pytest.raises(Cancelled):
+        convert_file(media["clip"], fm.BY_KEY["gif"], fm.ConvertOptions(gif_fps="10"),
+                     tools, out, cancel=cancel)
+    assert made and not any(p.exists() for p in made)
+    # отмена не должна оставить ни нового GIF, ни «.part»
+    assert sorted(p.name for p in out.iterdir()) == before, [p.name for p in out.iterdir()]
