@@ -11,9 +11,10 @@ import shutil
 import subprocess
 import sys
 import threading
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Iterable, Sequence
+from typing import IO, Callable, Iterable, Sequence
 
 IS_WINDOWS = os.name == "nt"
 EXE = ".exe" if IS_WINDOWS else ""
@@ -334,6 +335,44 @@ class ConvertError(RuntimeError):
     pass
 
 
+STDERR_TAIL = 200          # сколько последних строк stderr держим в памяти
+_STDERR_LINE_MAX = 400     # одна строка тоже не должна быть безразмерной
+
+
+def _drain_stderr(stream: IO[str] | None, tail: deque[str]) -> None:
+    """Вычитывает stderr ffmpeg построчно, оставляя только последние строки.
+
+    Без этого ffmpeg с большим объёмом диагностики (повреждённый файл,
+    `-loglevel debug`) упирается в буфер канала (~64 КБ), встаёт на записи и
+    перестаёт писать в stdout — а там висит наш цикл прогресса, вместе с
+    проверкой отмены.
+    """
+    if stream is None:
+        return
+    try:
+        for line in stream:
+            tail.append(line.rstrip("\r\n")[:_STDERR_LINE_MAX])
+    except (OSError, ValueError):
+        pass
+    finally:
+        try:
+            stream.close()
+        except (OSError, ValueError):
+            pass
+
+
+def _start_stderr_reader(proc: subprocess.Popen, tail: deque[str]) -> threading.Thread:
+    """Фоновый читатель stderr: daemon, чтобы не держать выход из процесса."""
+    thread = threading.Thread(
+        target=_drain_stderr,
+        args=(proc.stderr, tail),
+        name=f"ffmpeg-stderr-{proc.pid}",
+        daemon=True,
+    )
+    thread.start()
+    return thread
+
+
 def run_ffmpeg(
     cmd: Sequence[str],
     duration: float = 0.0,
@@ -343,7 +382,8 @@ def run_ffmpeg(
     """Запускает ffmpeg, транслирует прогресс (0..1) и поддерживает отмену.
 
     ffmpeg вызывается с `-progress pipe:1`, поэтому stdout содержит
-    строки вида `out_time_us=1234567` и `speed=1.42x`.
+    строки вида `out_time_us=1234567` и `speed=1.42x`. stderr читается
+    отдельным потоком — иначе большой поток ошибок блокирует ffmpeg.
     """
     flags = _popen_flags()
     proc = subprocess.Popen(
@@ -358,6 +398,8 @@ def run_ffmpeg(
         **flags,
     )
     speed = ""
+    tail: deque[str] = deque(maxlen=STDERR_TAIL)
+    reader = _start_stderr_reader(proc, tail)
     try:
         assert proc.stdout is not None
         for line in proc.stdout:
@@ -380,15 +422,20 @@ def run_ffmpeg(
                 pass
         proc.wait(timeout=30)
     finally:
+        if proc.stdout is not None:
+            try:
+                proc.stdout.close()
+            except (OSError, ValueError):
+                pass
         if proc.poll() is None:
             _kill(proc)
+        # процесс закончился — читатель должен увидеть EOF и выйти
+        reader.join(timeout=5.0)
 
     if proc.returncode not in (0, None) or (cancel and cancel.is_set()):
         if cancel is not None and cancel.is_set():
             raise Cancelled()
-        err = ""
-        if proc.stderr is not None:
-            err = proc.stderr.read() or ""
+        err = "\n".join(tail)
         raise ConvertError(_short_error(err) or f"ffmpeg завершился с кодом {proc.returncode}")
     if on_progress:
         on_progress(1.0, speed)

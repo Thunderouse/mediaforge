@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import sys
 import threading
 import time
+from collections import deque
 from pathlib import Path
 
 import pytest
@@ -32,12 +34,15 @@ from mediaforge.core.convert import (
 )
 from mediaforge.core.engine import STATUS_CANCELLED, STATUS_DONE, Engine, Job
 from mediaforge.core.ffmpeg import (
+    STDERR_TAIL,
     MediaInfo,
     Tools,
+    _drain_stderr,
     human_duration,
     human_size,
     iter_media_files,
     probe,
+    run_ffmpeg,
 )
 from mediaforge.core.timecode import format_timecode, parse_timecode
 
@@ -629,3 +634,124 @@ def test_cancel_midway_keeps_engine_consistent(monkeypatch, tmp_path):
     assert statuses.count(STATUS_CANCELLED) == 4
     assert engine.running is False
     assert engine._remaining == 0
+
+
+# --------------------------------------------------------------------------- #
+# stderr ffmpeg (регрессия: без вычитывания канал переполнялся и всё вставало)
+# --------------------------------------------------------------------------- #
+_NOISY_CHILD = r"""
+import sys
+for i in range(2000):
+    sys.stderr.write('noise line %05d %s\n' % (i, 'z' * 400))
+sys.stderr.write('Invalid data found when processing input\n')
+sys.stderr.flush()
+sys.stdout.write('out_time_us=2000000\n')
+sys.stdout.write('speed=1.0x\n')
+sys.stdout.write('progress=end\n')
+sys.stdout.flush()
+sys.exit(int(sys.argv[1]))
+"""
+
+
+def _noisy_cmd(code: int) -> list[str]:
+    return [sys.executable, "-c", _NOISY_CHILD, str(code)]
+
+
+def test_stderr_reader_keeps_only_tail():
+    """1 МБ строк → в памяти только хвост, поток завершается сам."""
+    import io
+
+    payload = "".join(f"line {i:06d} {'y' * 90}\n" for i in range(10_000))
+    assert len(payload) > 1_000_000
+    tail: deque[str] = deque(maxlen=STDERR_TAIL)
+    stream = io.StringIO(payload)
+
+    worker = threading.Thread(target=_drain_stderr, args=(stream, tail), daemon=True)
+    worker.start()
+    worker.join(10.0)
+
+    assert not worker.is_alive(), "читатель stderr не завершился"
+    assert len(tail) == STDERR_TAIL
+    assert tail[-1].startswith("line 009999")
+    assert tail[0].startswith("line 009800")
+
+
+def test_run_ffmpeg_survives_flooded_stderr():
+    """Ребёнок пишет ~800 КБ в stderr до stdout: старый код вешался навсегда."""
+    progress: list[float] = []
+    result: dict[str, object] = {}
+
+    def work() -> None:
+        try:
+            run_ffmpeg(_noisy_cmd(0), duration=2.0,
+                       on_progress=lambda p, speed: progress.append(p))
+            result["ok"] = True
+        except Exception as exc:  # noqa: BLE001 — нужен сам факт исключения
+            result["error"] = exc
+
+    worker = threading.Thread(target=work, daemon=True)
+    started = time.monotonic()
+    worker.start()
+    worker.join(20.0)
+
+    assert not worker.is_alive(), "run_ffmpeg завис на переполненном stderr"
+    assert time.monotonic() - started < 20.0
+    assert result.get("ok") is True, result.get("error")
+    assert progress[-1] == 1.0
+    assert any(p > 0 for p in progress)
+
+
+def test_run_ffmpeg_error_uses_stderr_tail():
+    """При ненулевом коде сообщение берётся из накопленного хвоста."""
+    with pytest.raises(ConvertError) as excinfo:
+        run_ffmpeg(_noisy_cmd(1), duration=2.0)
+    message = str(excinfo.value)
+    assert "Invalid data found when processing input" in message
+    assert len(message) <= 300
+
+
+@needs_ffmpeg
+def test_run_ffmpeg_with_debug_loglevel(media, tools, tmp_path):
+    """Шумный -loglevel debug на коротком файле: успех по коду возврата и в срок."""
+    out = tmp_path / "debug_out.mp4"
+    cmd = [
+        FFMPEG, "-hide_banner", "-loglevel", "debug", "-y",
+        "-i", str(media["clip"]), "-c:v", "libx264", "-preset", "ultrafast",
+        "-pix_fmt", "yuv420p", "-an", "-progress", "pipe:1", str(out),
+    ]
+    seen: list[float] = []
+    started = time.monotonic()
+    run_ffmpeg(cmd, duration=2.0, on_progress=lambda p, s: seen.append(p))
+    assert time.monotonic() - started < 60.0
+    assert out.exists() and out.stat().st_size > 0
+    assert seen[-1] == 1.0
+
+
+@needs_ffmpeg
+def test_run_ffmpeg_broken_input_raises(tools, tmp_path):
+    """Повреждённый файл: ConvertError с осмысленным текстом, без зависания."""
+    broken = tmp_path / "broken.mp4"
+    broken.write_bytes(b"\x00\x00\x00\x18ftypmp42" + b"\xff" * 4096)
+    cmd = [FFMPEG, "-hide_banner", "-loglevel", "debug", "-y",
+           "-i", str(broken), "-progress", "pipe:1", str(tmp_path / "o.mp4")]
+    started = time.monotonic()
+    with pytest.raises(ConvertError):
+        run_ffmpeg(cmd, duration=1.0)
+    assert time.monotonic() - started < 60.0
+
+
+@needs_ffmpeg
+def test_run_ffmpeg_cancel_during_noisy_stderr(tools, tmp_path):
+    """Отмена при шумном stderr: процесс убит, Cancelled за доли секунды."""
+    cmd = [
+        FFMPEG, "-hide_banner", "-loglevel", "debug", "-y",
+        "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=30",
+        "-t", "60", "-c:v", "libx264", "-preset", "ultrafast",
+        "-pix_fmt", "yuv420p", "-progress", "pipe:1", str(tmp_path / "long.mp4"),
+    ]
+    cancel = threading.Event()
+    threading.Timer(0.4, cancel.set).start()
+    started = time.monotonic()
+    with pytest.raises(Cancelled):
+        run_ffmpeg(cmd, duration=60.0, cancel=cancel)
+    assert time.monotonic() - started < 10.0
