@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QPointF, QRectF, QSize, Qt, QTimer, Signal
@@ -92,6 +93,8 @@ def app_icon(size: int = 256) -> QIcon:
 
 
 class MainWindow(QMainWindow):
+    PROBE_WORKERS = 4
+
     def __init__(self, settings: Settings, tools: Tools | None, ffmpeg_error: str = ""):
         super().__init__()
         self.settings = settings
@@ -105,6 +108,14 @@ class MainWindow(QMainWindow):
         self.bridge.updateReady.connect(self._on_update_ready, Qt.QueuedConnection)
         self._seen: set[Path] = set()
         self._ffmpeg_error = ffmpeg_error
+        # пробы идут через маленький пул: на пачку из 200 файлов иначе
+        # поднималось 200 потоков и 200 процессов ffprobe одновременно
+        self._probe_pool = ThreadPoolExecutor(max_workers=self.PROBE_WORKERS,
+                                              thread_name_prefix="mediaforge-probe")
+        self._probe_futures: dict[str, Future] = {}
+        # id попадает сюда ДО submit: иначе воркер успевает увидеть, что его
+        # ещё не зарегистрировали, и молча выходит
+        self._probe_pending: set[str] = set()
 
         self.setWindowTitle(f"{APP_NAME} — медиаконвертер")
         self.setMinimumSize(QSize(940, 620))
@@ -482,14 +493,17 @@ class MainWindow(QMainWindow):
             self.jobs.append(job)
             self.rows[job.id] = row
             added += 1
-            threading.Thread(target=self._probe_worker, args=(job.id, f),
-                             daemon=True).start()
+            self._probe_pending.add(job.id)
+            self._probe_futures[job.id] = self._probe_pool.submit(
+                self._probe_worker, job.id, f)
         if added:
             self._after_list_change()
             self._flash(f"Добавлено файлов: {added}")
 
     def _probe_worker(self, job_id: str, path: Path) -> None:
         if not self.tools:
+            return
+        if job_id not in self._probe_pending:      # строку уже убрали
             return
         try:
             info = probe(path, self.tools)
@@ -498,12 +512,21 @@ class MainWindow(QMainWindow):
         self.bridge.probed.emit(job_id, info)
 
     def _on_probed(self, job_id: str, info: MediaInfo) -> None:
-        row = self.rows.get(job_id)
+        self._probe_pending.discard(job_id)
+        self._probe_futures.pop(job_id, None)
+        row = self.rows.get(job_id)          # id удалённой строки здесь и отсекается
         if row is None:
             return
         row.set_info(info)
         self._after_list_change()
         self._update_summary()
+
+    def _cancel_probe(self, job_id: str) -> None:
+        """Снимает пробу с очереди: не начатые не запустятся вовсе."""
+        self._probe_pending.discard(job_id)
+        future = self._probe_futures.pop(job_id, None)
+        if future is not None:
+            future.cancel()
 
     def _on_row_target(self, job_id: str, key: str) -> None:
         job = next((j for j in self.jobs if j.id == job_id), None)
@@ -525,6 +548,7 @@ class MainWindow(QMainWindow):
             # задача ещё в очереди — движок получил снимок списка при старте,
             # поэтому просим его пропустить именно эту задачу
             job.cancel.set()
+        self._cancel_probe(job_id)
         row = self.rows.pop(job_id, None)
         if row is not None:
             self.list_lay.removeWidget(row)
@@ -542,6 +566,10 @@ class MainWindow(QMainWindow):
         if self._is_busy():
             self._flash("Сначала остановите конвертацию")
             return
+        for future in list(self._probe_futures.values()):
+            future.cancel()
+        self._probe_futures.clear()
+        self._probe_pending.clear()
         for job_id in list(self.rows):
             self._remove_row(job_id)
         self._flash("Список очищен")
@@ -896,6 +924,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event) -> None:  # noqa: N802
         if self.engine is not None and self.engine.running:
             self.engine.stop()
+        self._probe_pool.shutdown(wait=False, cancel_futures=True)
         g = self.geometry()
         self.settings.set("window_geometry", f"{g.x()},{g.y()},{g.width()},{g.height()}")
         self.settings.save()
