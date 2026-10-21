@@ -22,6 +22,7 @@ try:                       # на headless-машинах часто нет libE
     from PySide6.QtWidgets import QApplication
     from mediaforge.core import preview
     from mediaforge.core.config import Settings
+    from mediaforge.core.ffmpeg import Tools
 except ImportError as exc:  # noqa: BLE001
     if os.environ.get("CI"):
         raise RuntimeError(
@@ -78,3 +79,62 @@ def test_cleanup_runs_on_startup(monkeypatch, tmp_path):
     if proc.returncode != 0:
         pytest.skip(f"приложение не стартует в этом окружении: {proc.stderr[-300:]}")
     assert "CALLS: ['start']" in proc.stdout, proc.stdout + proc.stderr
+
+
+def _pump(app, seconds: float) -> None:
+    import time
+
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        app.processEvents()
+        time.sleep(0.01)
+
+
+def test_failed_probe_clears_queue_and_marks_row(qapp, monkeypatch, tmp_path):
+    """probe бросает исключение: очередь чиста, строка помечена."""
+    import mediaforge.ui.main_window as mw
+
+    monkeypatch.setenv("MEDIAFORGE_CONFIG_DIR", str(tmp_path))
+
+    def boom(path, tools):
+        raise RuntimeError("ffprobe упал")
+
+    monkeypatch.setattr(mw, "probe", boom)
+
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"not a real video")
+    win = mw.MainWindow(Settings(), Tools.locate(), "")
+    win.add_paths([video])
+
+    assert len(win._probe_futures) == 1
+    _pump(qapp, 1.0)
+
+    assert len(win._probe_futures) == 0, win._probe_futures
+    assert len(win._probe_pending) == 0, win._probe_pending
+    row = win.rows[win.jobs[0].id]
+    assert win.jobs[0].info.probe_failed is True
+    # text() обрезан по ширине строки — проверяем полный текст
+    assert "метаданные не прочитаны" in row.meta.fullText()
+
+
+def test_failed_probe_after_row_removed_is_safe(qapp, monkeypatch, tmp_path):
+    """Удалили строку, пока проба падала — ни ошибок, ни записей."""
+    import mediaforge.ui.main_window as mw
+
+    monkeypatch.setenv("MEDIAFORGE_CONFIG_DIR", str(tmp_path))
+
+    def boom(path, tools):
+        raise RuntimeError("ffprobe упал")
+
+    monkeypatch.setattr(mw, "probe", boom)
+
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"not a real video")
+    win = mw.MainWindow(Settings(), Tools.locate(), "")
+    win.add_paths([video])
+    win._remove_row(win.jobs[0].id)
+    _pump(qapp, 0.7)
+
+    assert win.rows == {}
+    assert len(win._probe_futures) == 0
+    assert len(win._probe_pending) == 0

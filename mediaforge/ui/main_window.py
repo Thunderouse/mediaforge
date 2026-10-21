@@ -68,6 +68,7 @@ class Bridge(QObject):
 
     event = Signal(str, object)
     probed = Signal(str, object)
+    probeFailed = Signal(str)
     updateReady = Signal(str, object)
 
 
@@ -106,6 +107,7 @@ class MainWindow(QMainWindow):
         self.bridge = Bridge(self)
         self.bridge.event.connect(self._on_engine_event, Qt.QueuedConnection)
         self.bridge.probed.connect(self._on_probed, Qt.QueuedConnection)
+        self.bridge.probeFailed.connect(self._on_probe_failed, Qt.QueuedConnection)
         self.bridge.updateReady.connect(self._on_update_ready, Qt.QueuedConnection)
         self._seen: set[Path] = set()
         self._ffmpeg_error = ffmpeg_error
@@ -502,24 +504,42 @@ class MainWindow(QMainWindow):
             self._flash(f"Добавлено файлов: {added}")
 
     def _probe_worker(self, job_id: str, path: Path) -> None:
-        if not self.tools:
-            return
         if job_id not in self._probe_pending:      # строку уже убрали
+            return
+        if not self.tools:
+            self.bridge.probeFailed.emit(job_id)
             return
         try:
             info = probe(path, self.tools)
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001 — не роняем пул из-за одного файла
+            # чистить словари здесь нельзя (они живут в UI-потоке) — сообщаем окну
+            self.bridge.probeFailed.emit(job_id)
             return
         self.bridge.probed.emit(job_id, info)
 
-    def _on_probed(self, job_id: str, info: MediaInfo) -> None:
+    def _finish_probe(self, job_id: str) -> None:
+        """Проба закончилась (любым исходом) — записи в очереди убираем."""
         self._probe_pending.discard(job_id)
         self._probe_futures.pop(job_id, None)
+
+    def _on_probed(self, job_id: str, info: MediaInfo) -> None:
+        self._finish_probe(job_id)
         row = self.rows.get(job_id)          # id удалённой строки здесь и отсекается
         if row is None:
             return
         row.set_info(info)
         self._after_list_change()
+        self._update_summary()
+
+    def _on_probe_failed(self, job_id: str) -> None:
+        """ffprobe не осилил файл: помечаем строку и освобождаем очередь."""
+        self._finish_probe(job_id)
+        row = self.rows.get(job_id)
+        if row is None:
+            return
+        if not row.job.info.probe_failed:
+            row.job.info.probe_failed = True
+        row.update_state()
         self._update_summary()
 
     def _cancel_probe(self, job_id: str) -> None:
