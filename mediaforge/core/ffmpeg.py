@@ -402,6 +402,35 @@ def _start_stderr_reader(proc: subprocess.Popen, tail: deque[str]) -> threading.
     return thread
 
 
+CANCEL_POLL = 0.1          # как часто сторож проверяет отмену, секунды
+
+
+def _start_cancel_watcher(
+    proc: subprocess.Popen, cancel, stop: threading.Event,
+) -> threading.Thread | None:
+    """Сторож отмены: убивает процесс, даже если ffmpeg молчит в stdout.
+
+    Цикл чтения прогресса блокируется на `readline`, поэтому «Остановить» без
+    такого сторожа не срабатывал до первой строки прогресса (инициализация,
+    медленный или сетевой вход).
+    """
+    if cancel is None:
+        return None
+
+    def watch() -> None:
+        while not stop.is_set():
+            if cancel.is_set():
+                _kill(proc)
+                return
+            stop.wait(CANCEL_POLL)
+
+    thread = threading.Thread(
+        target=watch, name=f"ffmpeg-cancel-{proc.pid}", daemon=True,
+    )
+    thread.start()
+    return thread
+
+
 def run_ffmpeg(
     cmd: Sequence[str],
     duration: float = 0.0,
@@ -429,6 +458,8 @@ def run_ffmpeg(
     speed = ""
     tail: deque[str] = deque(maxlen=STDERR_TAIL)
     reader = _start_stderr_reader(proc, tail)
+    stop_watch = threading.Event()
+    watcher = _start_cancel_watcher(proc, cancel, stop_watch)
     try:
         assert proc.stdout is not None
         for line in proc.stdout:
@@ -458,6 +489,9 @@ def run_ffmpeg(
                 pass
         if proc.poll() is None:
             _kill(proc)
+        stop_watch.set()
+        if watcher is not None:
+            watcher.join(timeout=1.0)
         # процесс закончился — читатель должен увидеть EOF и выйти
         reader.join(timeout=5.0)
 

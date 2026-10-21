@@ -1438,3 +1438,69 @@ def test_static_gif_without_ffprobe_stays_image(tools, tmp_path):
 
     assert info.probe_failed is True
     assert info.kind == "image"
+
+
+# --------------------------------------------------------------------------- #
+# Отмена без строк прогресса
+# --------------------------------------------------------------------------- #
+_SILENT_CHILD = r"""
+import os, sys, time
+pid_file, delay = sys.argv[1], float(sys.argv[2])
+with open(pid_file, "w") as fh:
+    fh.write(str(os.getpid()))
+time.sleep(delay)
+sys.stdout.write("out_time_us=2000000\n")
+sys.stdout.write("progress=end\n")
+sys.stdout.flush()
+"""
+
+
+@needs_ffmpeg
+def test_cancel_while_child_is_silent(tmp_path):
+    """Молчащий процесс: отмена за доли секунды, а не после первой строки."""
+    pid_file = tmp_path / "pid.txt"
+    cmd = [sys.executable, "-c", _SILENT_CHILD, str(pid_file), "5"]
+    cancel = threading.Event()
+    threading.Timer(0.3, cancel.set).start()
+
+    started = time.monotonic()
+    with pytest.raises(Cancelled):
+        run_ffmpeg(cmd, duration=2.0, cancel=cancel)
+    spent = time.monotonic() - started
+
+    assert spent < 2.0, f"отмена ждала прогресса {spent:.2f} с"
+    pid = int(pid_file.read_text() or 0)
+    assert pid
+    time.sleep(0.2)
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)          # процесс убит, сирот нет
+
+
+def test_silent_child_success_is_not_broken(tmp_path):
+    """Молчание + успешное завершение: поведение прежнее, прогресс доходит до 1."""
+    seen: list[float] = []
+    cmd = [sys.executable, "-c", _SILENT_CHILD, str(tmp_path / "pid.txt"), "0.3"]
+
+    run_ffmpeg(cmd, duration=2.0, on_progress=lambda p, s: seen.append(p))
+
+    assert seen[-1] == 1.0
+    assert any(p > 0 for p in seen)
+
+
+@needs_ffmpeg
+def test_cancel_with_noisy_stderr_is_still_fast(media, tools, tmp_path):
+    """Шумный stderr + отмена: не медленнее, чем раньше."""
+    cmd = [
+        FFMPEG, "-hide_banner", "-loglevel", "debug", "-y",
+        "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=30",
+        "-t", "60", "-c:v", "libx264", "-preset", "ultrafast",
+        "-pix_fmt", "yuv420p", "-progress", "pipe:1", str(tmp_path / "long.mp4"),
+    ]
+    cancel = threading.Event()
+    threading.Timer(0.4, cancel.set).start()
+
+    started = time.monotonic()
+    with pytest.raises(Cancelled):
+        run_ffmpeg(cmd, duration=60.0, cancel=cancel)
+
+    assert time.monotonic() - started < 3.0
