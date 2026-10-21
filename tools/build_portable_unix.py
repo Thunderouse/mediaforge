@@ -395,6 +395,7 @@ def build(target_key: str, out: Path, cache: Path, stage_dir: Path | None = None
                   if src.suffix == ".sh" else dst.stat().st_mode)
 
     missing = missing_elf_deps(stage)
+    out.mkdir(parents=True, exist_ok=True)      # --out может ещё не существовать
     archive = out / f"{name}.tar.gz"
     print(f"→ архив {archive.name}")
     if archive.exists():
