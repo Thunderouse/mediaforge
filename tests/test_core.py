@@ -23,7 +23,7 @@ from mediaforge.core import engine as engine_mod
 from mediaforge.core import formats as fm
 from mediaforge.core import preview as pv
 from mediaforge.core import updates
-from mediaforge.core.config import Settings
+from mediaforge.core.config import Settings, config_path
 from mediaforge.core.convert import (
     Cancelled,
     ConversionResult,
@@ -1286,7 +1286,7 @@ def test_load_repairs_broken_settings_file(tmp_path, monkeypatch):
     # посторонний ключ не потерян и не мешает
     assert settings.get("unknown_key") == {"x": 1}
 
-    settings.save()                       # файл остаётся читаемым
+    settings.flush()                      # save() отложен, нужен явный сброс
     again = Settings.load()
     assert again.options() == opts
 
@@ -1504,3 +1504,73 @@ def test_cancel_with_noisy_stderr_is_still_fast(media, tools, tmp_path):
         run_ffmpeg(cmd, duration=60.0, cancel=cancel)
 
     assert time.monotonic() - started < 3.0
+
+
+# --------------------------------------------------------------------------- #
+# Технические долги: дебаунс, атомарность, таймаут
+# --------------------------------------------------------------------------- #
+def test_save_is_debounced(tmp_path, monkeypatch):
+    """Восемь изменений подряд — одна запись файла, и та после паузы."""
+    monkeypatch.setenv("MEDIAFORGE_CONFIG_DIR", str(tmp_path))
+    settings = Settings()
+
+    writes: list[str] = []
+    real_replace = os.replace
+
+    def counting_replace(src, dst, *a, **kw):
+        writes.append(str(dst))
+        return real_replace(src, dst, *a, **kw)
+
+    monkeypatch.setattr("mediaforge.core.config.os.replace", counting_replace)
+
+    for i in range(8):
+        settings.set("opt_image_width", str(1920 + i))
+        settings.save()
+    assert writes == [], "запись началась сразу, дебаунса нет"
+
+    time.sleep(0.6)
+    assert len(writes) == 1, f"записей: {len(writes)}"
+    data = json.loads(config_path().read_text(encoding="utf-8"))
+    assert data["opt_image_width"] == "1927"
+
+
+def test_save_is_atomic_and_leaves_no_tmp(tmp_path, monkeypatch):
+    monkeypatch.setenv("MEDIAFORGE_CONFIG_DIR", str(tmp_path))
+    settings = Settings()
+    settings.set("theme", "light")
+    settings.flush()
+
+    files = sorted(p.name for p in tmp_path.iterdir())
+    assert files == ["settings.json"], files
+    assert json.loads((tmp_path / "settings.json").read_text(encoding="utf-8"))["theme"] == "light"
+
+
+def test_wait_timeout_becomes_convert_error(tmp_path, monkeypatch):
+    """Процесс закрыл stdout, но не завершился — понятная ошибка, а не TimeoutExpired."""
+    import mediaforge.core.ffmpeg as ff
+
+    # закрываем именно файловый дескриптор stdout: TextIOWrapper.close()
+    # не даёт EOF, пока процесс жив
+    child = (
+        "import os, sys, time\n"
+        "sys.stdout.write('progress=continue\\n')\n"
+        "sys.stdout.flush()\n"
+        "os.close(1)\n"
+        "time.sleep(5)\n"
+    )
+    monkeypatch.setattr(ff, "WAIT_TIMEOUT", 0.2)
+
+    started = time.monotonic()
+    with pytest.raises(ConvertError) as excinfo:
+        run_ffmpeg([sys.executable, "-c", child])
+    spent = time.monotonic() - started
+
+    assert "не завершился" in str(excinfo.value)
+    assert spent < 3.0, f"ждали {spent:.2f} с"
+
+
+def test_unique_path_reserve_is_keyword_only(tmp_path):
+    """reserve — только по имени: позиционный вызов должен падать."""
+    with pytest.raises(TypeError):
+        unique_path(tmp_path, "a", "ext", True, False)   # noqa: B026
+    assert unique_path(tmp_path, "a", "ext", True, reserve=False) == tmp_path / "a.ext"

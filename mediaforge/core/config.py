@@ -7,6 +7,7 @@ import logging
 import math
 import os
 import sys
+import threading
 from dataclasses import asdict, fields
 from pathlib import Path
 
@@ -38,6 +39,9 @@ def config_path() -> Path:
 
 
 THEMES = ("system", "light", "dark")
+
+# сколько ждём после последнего изменения, прежде чем писать файл
+SAVE_DELAY = 0.3
 
 _TRUE = {"1", "true", "yes", "on", "да"}
 _FALSE = {"0", "false", "no", "off", "", "нет"}
@@ -163,6 +167,8 @@ class Settings:
     def __init__(self, data: dict | None = None):
         self._data = dict(DEFAULTS)
         self._data.update(data or {})
+        self._save_lock = threading.Lock()
+        self._save_timer: threading.Timer | None = None
         self.sanitize(log_problems=True)
 
     # ------------------------------------------------------------------ #
@@ -176,12 +182,36 @@ class Settings:
             pass
         return cls()
 
-    def save(self) -> None:
+    def save(self, immediate: bool = False) -> None:
+        """Планирует запись с задержкой `SAVE_DELAY`; `immediate=True` — сразу.
+
+        Ввод в поле «1920» — это четыре вызова на символ; раньше каждый писал
+        файл целиком. Теперь запись склеивается в одну.
+        """
+        if immediate:
+            self.flush()
+            return
+        with self._save_lock:
+            if self._save_timer is not None:
+                self._save_timer.cancel()
+            timer = threading.Timer(SAVE_DELAY, self.flush)
+            timer.daemon = True
+            self._save_timer = timer
+            timer.start()
+
+    def flush(self) -> None:
+        """Немедленная атомарная запись: tmp-файл + os.replace."""
+        with self._save_lock:
+            if self._save_timer is not None:
+                self._save_timer.cancel()
+                self._save_timer = None
+            data = dict(self._data)
         try:
             config_dir().mkdir(parents=True, exist_ok=True)
-            config_path().write_text(
-                json.dumps(self._data, ensure_ascii=False, indent=2), "utf-8"
-            )
+            path = config_path()
+            tmp = path.with_name(f"{path.name}.tmp")
+            tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), "utf-8")
+            os.replace(tmp, path)      # не оставляет полузаписанный settings.json
         except OSError:
             pass
 

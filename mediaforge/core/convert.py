@@ -89,6 +89,8 @@ def target_image_size(size: tuple[int, int], opts: fm.ConvertOptions) -> tuple[i
     return width, height
 
 
+_IMG_MAX_EDGE = {"2160": 2160, "1440": 1440, "1080": 1080, "720": 720, "480": 480}
+
 _IMG_QUALITY = {
     # (jpeg/webp/avif quality, png compress level)
     "high": (95, 9),
@@ -306,9 +308,6 @@ def build_audio_cmd(
 # Изображения: Pillow, с откатом на ffmpeg
 # --------------------------------------------------------------------------- #
 
-_IMG_MAX_EDGE = {"2160": 2160, "1440": 1440, "1080": 1080, "720": 720, "480": 480}
-
-
 def _check_cancel(cancel: threading.Event | None) -> None:
     if cancel is not None and cancel.is_set():
         raise Cancelled()
@@ -405,7 +404,7 @@ def _convert_image_ffmpeg(
         crf = {"high": 24, "balanced": 30, "small": 38}[opts.quality]
         cmd += ["-c:v", enc, "-crf", str(crf), "-b:v", "0", "-still-picture", "1",
                 "-pix_fmt", "yuv420p"]
-    elif target.key in ("png", "png_lossless"):
+    elif target.key == "png":
         cmd += ["-c:v", "png"]
     else:
         cmd += ["-q:v", str(max(1, min(31, 31 - quality // 4)))]
@@ -419,7 +418,8 @@ def _convert_image_ffmpeg(
 
 
 def unique_path(
-    directory: Path, stem: str, ext: str, overwrite: bool = False, reserve: bool = True,
+    directory: Path, stem: str, ext: str,
+    overwrite: bool = False, *, reserve: bool = True,
 ) -> Path:
     """Свободное имя в `directory`, которое не достанется другому потоку.
 
@@ -428,6 +428,10 @@ def unique_path(
     пишут в один файл. Поэтому при `reserve=True` имя бронируется пустым
     файлом через O_CREAT|O_EXCL — атомарно на уровне ФС. Флаг `-y` у ffmpeg
     и запись Pillow перезаписывают заглушку молча.
+
+    `reserve=False` — только подобрать свободное имя, ничего не создавая
+    (нужно, если файл создаст кто-то другой). Права 0o666, как у обычного
+    `open()`, — umask процесса применяется к ним как всегда.
     """
     directory.mkdir(parents=True, exist_ok=True)
     candidate = directory / f"{stem}.{ext}"
@@ -439,7 +443,6 @@ def unique_path(
             candidate = directory / f"{stem} ({i}).{ext}"
         if reserve:
             try:
-                # 0o666 без umask-сюрпризов: права как у обычного файла
                 fd = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666)
             except FileExistsError:
                 i += 1

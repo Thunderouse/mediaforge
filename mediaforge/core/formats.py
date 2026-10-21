@@ -73,8 +73,8 @@ def default_target(src_ext: str, kind: str) -> str:
     if kind == KIND_IMAGE:
         return "png" if src_ext in {"png", "webp"} else "webp"
     if kind == KIND_VIDEO:
-        return "mp4" if src_ext in {"mp4", "m4v", "mov"} else "mp4"
-    return "mp3" if src_ext == "mp3" else "mp3"
+        return "mp4"
+    return "mp3"
 
 
 # --------------------------------------------------------------------------- #
@@ -100,11 +100,6 @@ GIF_FPS = ("10", "12", "15", "20", "25", "30")
 AUDIO_BITRATES = ("96k", "128k", "160k", "192k", "256k", "320k")
 
 # масштаб изображений
-IMAGE_SCALES = (
-    ("none", "Не менять"),
-    ("percent", "Проценты"),
-    ("size", "Ширина и высота"),
-)
 IMAGE_PERCENTS = ("25", "50", "75", "125", "150", "200", "300", "400")
 IMAGE_FILTERS = (
     ("lanczos", "Lanczos · лучшее"),
@@ -115,7 +110,7 @@ IMAGE_FILTERS = (
 # то, что реально принимают команды и UI (для валидации настроек)
 QUALITY_VALUES = tuple(key for key, _ in QUALITY_LABELS)
 RESOLUTION_VALUES = tuple(key for key, _ in RESOLUTIONS)
-IMAGE_SCALE_VALUES = tuple(key for key, _ in IMAGE_SCALES)
+IMAGE_SCALE_VALUES = ("none", "percent", "size")
 IMAGE_FILTER_VALUES = tuple(key for key, _ in IMAGE_FILTERS)
 
 

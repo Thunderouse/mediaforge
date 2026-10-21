@@ -403,6 +403,7 @@ def _start_stderr_reader(proc: subprocess.Popen, tail: deque[str]) -> threading.
 
 
 CANCEL_POLL = 0.1          # как часто сторож проверяет отмену, секунды
+WAIT_TIMEOUT = 30.0        # сколько ждём завершения после EOF в stdout
 
 
 def _start_cancel_watcher(
@@ -480,7 +481,11 @@ def run_ffmpeg(
                 speed = line.split("=", 1)[1].strip()
             elif line.startswith(("progress=end", "progress=continue")) and on_progress:
                 pass
-        proc.wait(timeout=30)
+        try:
+            proc.wait(timeout=WAIT_TIMEOUT)
+        except subprocess.TimeoutExpired as exc:
+            raise ConvertError(
+                f"ffmpeg не завершился за {WAIT_TIMEOUT:.0f} с — процесс остановлен") from exc
     finally:
         if proc.stdout is not None:
             try:

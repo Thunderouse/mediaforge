@@ -932,5 +932,5 @@ class MainWindow(QMainWindow):
             pass
         g = self.geometry()
         self.settings.set("window_geometry", f"{g.x()},{g.y()},{g.width()},{g.height()}")
-        self.settings.save()
+        self.settings.flush()          # save() отложен — при выходе пишем сразу
         super().closeEvent(event)

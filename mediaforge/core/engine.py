@@ -41,10 +41,6 @@ class Job:
     def name(self) -> str:
         return self.src.name
 
-    @property
-    def out_ext(self) -> str:
-        return "gif" if self.target.key.startswith("gif") else self.target.ext
-
 
 EventCB = Callable[[str, Job], None]
 
@@ -84,7 +80,6 @@ class Engine:
         self._lock = threading.Lock()
         self._running = 0
         self._done_count = 0
-        self._total = 0
         self._remaining = 0
         self._last_emit: dict[str, float] = {}
 
@@ -105,7 +100,6 @@ class Engine:
         if self.running:
             return
         self._cancel = threading.Event()
-        self._total = len(jobs)
         self._done_count = 0
         self._remaining = len(jobs)
         self._last_emit.clear()
