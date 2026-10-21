@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+from mediaforge.core import convert as conv
 from mediaforge.core import engine as engine_mod
 from mediaforge.core import formats as fm
 from mediaforge.core import preview as pv
@@ -1051,3 +1052,130 @@ def test_job_cancel_flag_is_reset_on_restart(monkeypatch, tmp_path):
 
     assert calls == ["clip0.mp4"], "флаг отмены пережил перезапуск"
     assert jobs[0].status == STATUS_DONE
+
+
+# --------------------------------------------------------------------------- #
+# overwrite=True: свой .part у каждого потока, атомарная публикация
+# --------------------------------------------------------------------------- #
+def test_part_targets_unique_for_same_stem(tmp_path):
+    """Два потока с одинаковым stem не должны получить общий .part."""
+    dst = tmp_path / "clip.mp4"
+    barrier = threading.Barrier(2, timeout=10)
+    lock = threading.Lock()
+    parts: list[Path] = []
+
+    def worker() -> None:
+        barrier.wait()
+        path = conv._part_target(dst)
+        with lock:
+            parts.append(path)
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(10)
+        assert not thread.is_alive()
+
+    assert len(parts) == 2
+    assert parts[0] != parts[1], "оба потока получили один .part"
+    assert all(p.name.startswith("clip.part") and p.suffix == ".mp4" for p in parts), parts
+    assert all(p.exists() and p.stat().st_size == 0 for p in parts)
+
+
+@needs_ffmpeg
+def test_parallel_overwrite_keeps_both_outputs(media, tools, tmp_path):
+    """Barrier-тест: два потока с разными stem перезаписывают каждый своё."""
+    out = tmp_path / "out"
+    out.mkdir()
+    a = tmp_path / "a.mp4"
+    b = tmp_path / "b.mp4"
+    shutil.copyfile(media["clip"], a)
+    shutil.copyfile(media["silent"], b)
+    (out / "a.gif").write_bytes(b"old a")
+    (out / "b.gif").write_bytes(b"old b")
+
+    barrier = threading.Barrier(2, timeout=10)
+    results: dict[str, ConversionResult] = {}
+    errors: list[BaseException] = []
+    lock = threading.Lock()
+
+    def worker(src: Path) -> None:
+        try:
+            barrier.wait()
+            res = convert_file(src, fm.BY_KEY["gif"], fm.ConvertOptions(overwrite=True),
+                               tools, out)
+            with lock:
+                results[src.stem] = res
+        except BaseException as exc:  # noqa: BLE001 — покажем в assert
+            with lock:
+                errors.append(exc)
+
+    threads = [threading.Thread(target=worker, args=(src,)) for src in (a, b)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(120)
+        assert not thread.is_alive()
+
+    assert not errors, errors
+    assert set(results) == {"a", "b"}
+    assert results["a"].output == out / "a.gif"
+    assert results["b"].output == out / "b.gif"
+    assert (out / "a.gif").exists() and (out / "b.gif").exists()
+    assert (out / "a.gif").read_bytes() != (out / "b.gif").read_bytes()
+    assert sorted(p.name for p in out.iterdir()) == ["a.gif", "b.gif"]
+
+
+@needs_ffmpeg
+def test_overwrite_uses_part_and_publishes(media, tools, tmp_path, monkeypatch):
+    """Успех: запись идёт в .part, публикация — os.replace, .part не остаётся."""
+    out = tmp_path / "out"
+    out.mkdir()
+    existing = out / "clip.mp4"
+    existing.write_bytes(b"old")
+
+    seen: list[tuple[str, str]] = []
+    import mediaforge.core.convert as conv
+
+    real_publish = conv._publish
+    real_part = conv._part_target
+
+    def spy_part(dst: Path) -> Path:
+        part = real_part(dst)
+        seen.append(("part", part.name))
+        return part
+
+    def spy_publish(part: Path, dst: Path) -> None:
+        seen.append(("replace", part.name))
+        assert part.name.startswith("clip.part")
+        assert part.stat().st_size > 0
+        real_publish(part, dst)
+
+    monkeypatch.setattr(conv, "_part_target", spy_part)
+    monkeypatch.setattr(conv, "_publish", spy_publish)
+
+    result = convert_file(media["clip"], fm.BY_KEY["mp4"],
+                          fm.ConvertOptions(overwrite=True), tools, out)
+
+    assert result.output == existing
+    assert [kind for kind, _ in seen] == ["part", "replace"], seen
+    assert existing.stat().st_size > 1000
+    assert sorted(p.name for p in out.iterdir()) == ["clip.mp4"]
+
+
+@needs_ffmpeg
+def test_overwrite_error_removes_part_and_keeps_file(media, tools, tmp_path):
+    """Ошибка: .part удалён, старый файл цел."""
+    out = tmp_path / "out"
+    out.mkdir()
+    src = tmp_path / "a.mp4"
+    shutil.copyfile(media["silent"], src)
+    existing = out / "a.mp3"
+    existing.write_bytes(b"real data")
+
+    with pytest.raises(ConvertError):
+        convert_file(src, fm.BY_KEY["mp3"], fm.ConvertOptions(overwrite=True), tools, out)
+
+    assert existing.read_bytes() == b"real data"
+    assert sorted(p.name for p in out.iterdir()) == ["a.mp3"], [p.name for p in out.iterdir()]

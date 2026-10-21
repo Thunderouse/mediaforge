@@ -490,10 +490,10 @@ def convert_file(
     if overwrite and (out_dir / f"{src.stem}.{ext}").resolve() == src.resolve():
         overwrite = False
     dst = unique_path(out_dir, src.stem, ext, overwrite)
-    # Пишем во временный файл рядом и подменяем результат в конце: ошибка не
-    # уничтожает уже существующий файл, а успешная перезапись атомарна.
-    # Расширение сохраняем — ffmpeg выбирает муксер по нему.
-    tmp = _temp_target(out_dir, ext)
+    # Пишем в <имя>.part.<ext> и публикуем os.replace по успеху: ошибка не
+    # уничтожает уже существующий файл, а замена атомарна. Расширение в имени
+    # сохраняем — ffmpeg и Pillow выбирают формат по нему, а не по «.part».
+    tmp = _part_target(dst)
 
     try:
         if is_image_path:
@@ -527,7 +527,7 @@ def convert_file(
 
         if not tmp.exists() or tmp.stat().st_size == 0:
             raise ConvertError("ffmpeg не создал выходной файл")
-        os.replace(tmp, dst)          # атомарная подмена результата
+        _publish(tmp, dst)            # атомарная подмена результата
     except BaseException:
         _cleanup(tmp)
         if not overwrite:
@@ -539,19 +539,33 @@ def convert_file(
     return ConversionResult(output=dst, note=note)
 
 
-def _temp_target(directory: Path, ext: str) -> Path:
-    """Уникальный скрытый файл рядом с результатом, с тем же расширением."""
+def _part_target(dst: Path) -> Path:
+    """Временный файл рядом с целью: `<имя>.part.<ext>`, занят — `.part2`, `.part3`.
+
+    Бронь через O_CREAT|O_EXCL атомарна, поэтому два потока с одинаковым stem
+    никогда не получат один и тот же временный путь. Расширение оставляем в
+    конце имени: и ffmpeg, и Pillow определяют формат именно по нему.
+    """
+    directory, name, ext = dst.parent, dst.stem, dst.suffix
+    i = 0
     while True:
-        path = directory / f".mediaforge-{os.urandom(6).hex()}.{ext}"
+        suffix = ".part" if i == 0 else f".part{i + 1}"
+        candidate = directory / f"{name}{suffix}{ext}"
         try:
-            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666)
+            fd = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666)
         except FileExistsError:
+            i += 1
             continue
         except OSError:
             # ФС не умеет O_EXCL — имя и так почти наверняка свободно
-            return path
+            return candidate
         os.close(fd)
-        return path
+        return candidate
+
+
+def _publish(part: Path, dst: Path) -> None:
+    """Атомарная публикация результата: os.replace в пределах одной папки."""
+    os.replace(part, dst)
 
 
 def _cleanup(path: Path) -> None:
