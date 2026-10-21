@@ -12,6 +12,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont, QFontDatabase, QGuiApplication
 from PySide6.QtWidgets import QApplication, QMessageBox
 
+from .core import preview as preview_cache
 from .core.config import APP_NAME, APP_VERSION, Settings
 from .core.ffmpeg import FFmpegNotFound, Tools
 from .ui import theme
@@ -76,6 +77,10 @@ def main(argv: list[str] | None = None) -> int:
 
     settings = Settings.load()
     theme.apply(settings.get("theme", "system"))
+    try:                       # старый кэш предпросмотра не должен копиться
+        preview_cache.cleanup()
+    except Exception:  # noqa: BLE001 — уборка не повод не запуститься
+        pass
 
     tools: Tools | None
     error = ""

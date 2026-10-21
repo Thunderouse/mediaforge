@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..core import formats as fm
+from ..core import preview as preview_cache
 from ..core import updates
 from ..core.config import APP_NAME, APP_VERSION, Settings
 from ..core.engine import (
@@ -925,6 +926,10 @@ class MainWindow(QMainWindow):
         if self.engine is not None and self.engine.running:
             self.engine.stop()
         self._probe_pool.shutdown(wait=False, cancel_futures=True)
+        try:                    # подчищаем кэш кадров при выходе
+            preview_cache.cleanup()
+        except Exception:  # noqa: BLE001 — закрытие не должно падать
+            pass
         g = self.geometry()
         self.settings.set("window_geometry", f"{g.x()},{g.y()},{g.width()},{g.height()}")
         self.settings.save()

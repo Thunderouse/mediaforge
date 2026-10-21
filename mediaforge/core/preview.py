@@ -10,11 +10,18 @@ from __future__ import annotations
 import hashlib
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 
 from .ffmpeg import MediaInfo, Tools, _popen_flags
 
 CACHE_DIR = Path(tempfile.gettempdir()) / "mediaforge-preview"
+
+# кэш кадров: старше недели или сверх 200 МБ — удаляем
+MAX_AGE_DAYS = 7
+MAX_BYTES = 200 * 1024 * 1024
+# файлы моложе этого возраста не трогаем: их только что записала текущая сессия
+PROTECT_SECONDS = 3600.0
 
 
 def _cache_path(src: Path, tag: str, *parts) -> Path:
@@ -168,12 +175,62 @@ def cache_size() -> int:
     return sum(f.stat().st_size for f in CACHE_DIR.glob("*") if f.is_file())
 
 
-def cleanup() -> None:
-    for f in CACHE_DIR.glob("*.png"):
-        try:
-            f.unlink()
-        except OSError:
-            pass
+def _unlink(path: Path) -> bool:
+    try:
+        path.unlink()
+        return True
+    except OSError:
+        return False
+
+
+def cleanup(
+    max_age_days: float = MAX_AGE_DAYS,
+    max_bytes: int = MAX_BYTES,
+    protect_seconds: float = PROTECT_SECONDS,
+) -> int:
+    """Чистит кэш: сначала по возрасту, потом по размеру (старые первыми).
+
+    Возвращает, сколько байт освободилось. Файлы моложе `protect_seconds`
+    не трогаем — их пишет текущая сессия, и пересоздавать кадры незачем.
+    Любые ошибки ФС глушим: уборка не должна мешать запуску и закрытию.
+    """
+    try:
+        if not CACHE_DIR.exists():
+            return 0
+        entries: list[tuple[float, int, Path]] = []
+        for path in CACHE_DIR.iterdir():
+            try:
+                if not path.is_file():
+                    continue
+                stat = path.stat()
+            except OSError:
+                continue
+            entries.append((stat.st_mtime, stat.st_size, path))
+    except OSError:
+        return 0
+
+    now = time.time()
+    cutoff = now - max_age_days * 86400.0
+    freed = 0
+    survivors: list[tuple[float, int, Path]] = []
+    for mtime, size, path in entries:
+        if mtime < cutoff and now - mtime > protect_seconds:
+            if _unlink(path):
+                freed += size
+        else:
+            survivors.append((mtime, size, path))
+
+    total = sum(size for _mtime, size, _path in survivors)
+    if max_bytes > 0 and total > max_bytes:
+        for mtime, size, path in sorted(survivors):     # самые старые первыми
+            if total <= max_bytes:
+                break
+            if now - mtime <= protect_seconds:
+                continue
+            if _unlink(path):
+                total -= size
+                freed += size
+    return freed
 
 
 def thumbnail_path(src: Path, tools: Tools, info: MediaInfo) -> Path | None:

@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -396,8 +397,21 @@ def test_preview_frame_and_strip(tools, media, tmp_path):
     assert pv.frame_at(media["clip"], tools, 0.5, 320) == frame
 
 
-def test_preview_cache_cleanup(media):
-    pv.cleanup()
+def test_preview_cache_cleanup(tmp_path, monkeypatch):
+    """Полная уборка — только по явному запросу (возраст 0, без защиты).
+
+    Раньше тест вычищал настоящий кэш в темпе и требовал пустоты; теперь
+    кэш чистится по возрасту/размеру, поэтому работаем в своей папке.
+    """
+    monkeypatch.setattr(pv, "CACHE_DIR", tmp_path)
+    stamp = time.time() - 3600
+    for name in ("a.png", "b.png"):
+        path = tmp_path / name
+        path.write_bytes(b"x" * 10)
+        os.utime(path, (stamp, stamp))      # час назад, иначе mtime может совпасть с now
+    assert pv.cache_size() == 20
+
+    pv.cleanup(max_age_days=0, protect_seconds=0)
     assert pv.cache_size() == 0
 
 
@@ -1286,3 +1300,69 @@ def test_options_stay_valid_after_direct_set():
     assert opts.quality in fm.QUALITY_VALUES
     assert opts.image_percent in fm.IMAGE_PERCENTS
     assert opts.trim_end == 0.0
+
+
+# --------------------------------------------------------------------------- #
+# Кэш предпросмотра: возраст и размер
+# --------------------------------------------------------------------------- #
+def _touch(path: Path, size: int, age_seconds: float) -> Path:
+    path.write_bytes(b"z" * size)
+    stamp = time.time() - age_seconds
+    os.utime(path, (stamp, stamp))
+    return path
+
+
+def test_preview_cleanup_removes_old_keeps_fresh(tmp_path, monkeypatch):
+    monkeypatch.setattr(pv, "CACHE_DIR", tmp_path)
+    old = _touch(tmp_path / "old.png", 100, age_seconds=10 * 86400)
+    fresh = _touch(tmp_path / "fresh.png", 100, age_seconds=60)
+
+    freed = pv.cleanup(max_age_days=7)
+
+    assert not old.exists(), "старый файл не удалён"
+    assert fresh.exists(), "свежий файл удалён"
+    assert freed == 100
+
+
+def test_preview_cleanup_trims_by_size_oldest_first(tmp_path, monkeypatch):
+    monkeypatch.setattr(pv, "CACHE_DIR", tmp_path)
+    files = [_touch(tmp_path / f"f{i}.png", 1000, age_seconds=(10 - i) * 7200)
+             for i in range(5)]
+
+    freed = pv.cleanup(max_age_days=30, max_bytes=3000, protect_seconds=0)
+
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["f2.png", "f3.png", "f4.png"]
+    assert not files[0].exists() and not files[1].exists()
+    assert freed == 2000
+
+
+def test_preview_cleanup_keeps_current_session_files(tmp_path, monkeypatch):
+    monkeypatch.setattr(pv, "CACHE_DIR", tmp_path)
+    for i in range(5):
+        _touch(tmp_path / f"new{i}.png", 1000, age_seconds=i * 10)
+
+    freed = pv.cleanup(max_age_days=30, max_bytes=1000)   # лимит меньше объёма
+
+    assert len(list(tmp_path.iterdir())) == 5, "тронули файлы текущей сессии"
+    assert freed == 0
+
+
+def test_preview_cleanup_missing_or_empty_dir(tmp_path, monkeypatch):
+    monkeypatch.setattr(pv, "CACHE_DIR", tmp_path / "нет-такой-папки")
+    assert pv.cleanup() == 0
+
+    monkeypatch.setattr(pv, "CACHE_DIR", tmp_path)
+    assert pv.cleanup() == 0
+
+    (tmp_path / "subdir").mkdir()
+    (tmp_path / "broken.png").write_bytes(b"x")
+    (tmp_path / "broken.png").chmod(0o000)      # нет прав на чтение файла
+    assert pv.cleanup(max_age_days=0) >= 0      # не падаем
+    (tmp_path / "broken.png").chmod(0o644)
+
+
+def test_cache_size_ignores_directories(tmp_path, monkeypatch):
+    monkeypatch.setattr(pv, "CACHE_DIR", tmp_path)
+    _touch(tmp_path / "a.png", 500, age_seconds=10)
+    (tmp_path / "sub").mkdir()
+    assert pv.cache_size() == 500
