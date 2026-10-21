@@ -1036,7 +1036,7 @@ def test_removed_pending_job_is_skipped(monkeypatch, tmp_path):
     release = threading.Event()
 
     def fake_convert(src, target, opts, tools, out_dir, info=None,
-                     on_progress=None, cancel=None):
+                     on_progress=None, cancel=None, claimed=None):
         with lock:
             calls.append(src.name)
             number = len(calls)
@@ -1072,7 +1072,7 @@ def test_job_cancel_flag_is_reset_on_restart(monkeypatch, tmp_path):
     calls: list[str] = []
 
     def fake_convert(src, target, opts, tools, out_dir, info=None,
-                     on_progress=None, cancel=None):
+                     on_progress=None, cancel=None, claimed=None):
         calls.append(src.name)
         return ConversionResult(output=Path(out_dir) / f"{src.stem}.{target.ext}")
 
@@ -1753,3 +1753,112 @@ def test_unwritable_log_dir_does_not_crash(tmp_path):
 
     # и приложение после этого пишет настройки как обычно
     cfg.log.warning("сообщение без файла")
+
+
+# --------------------------------------------------------------------------- #
+# overwrite=True: результаты задач одного запуска не затирают друг друга
+# --------------------------------------------------------------------------- #
+@needs_ffmpeg
+def test_overwrite_same_stem_in_run_keeps_both(media, tools, tmp_path):
+    """Barrier: два файла с одинаковым stem и overwrite -> a.gif и a (1).gif."""
+    out = tmp_path / "out"
+    out.mkdir()
+    first_dir = tmp_path / "one"
+    second_dir = tmp_path / "two"
+    for d in (first_dir, second_dir):
+        d.mkdir()
+    a = first_dir / "a.mp4"
+    b = second_dir / "a.mp4"
+    shutil.copyfile(media["clip"], a)
+    shutil.copyfile(media["silent"], b)
+
+    claimed: set[Path] = set()
+    barrier = threading.Barrier(2, timeout=15)
+    lock = threading.Lock()
+    results: list[ConversionResult] = []
+    errors: list[BaseException] = []
+
+    def worker(src: Path) -> None:
+        try:
+            barrier.wait()
+            res = convert_file(src, fm.BY_KEY["gif"], fm.ConvertOptions(overwrite=True),
+                               tools, out, claimed=claimed)
+            with lock:
+                results.append(res)
+        except BaseException as exc:  # noqa: BLE001
+            with lock:
+                errors.append(exc)
+
+    threads = [threading.Thread(target=worker, args=(src,)) for src in (a, b)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(180)
+        assert not thread.is_alive()
+
+    assert not errors, errors
+    names = sorted(p.name for p in out.iterdir())
+    assert names == ["a (1).gif", "a.gif"], names
+    assert (out / "a.gif").read_bytes() != (out / "a (1).gif").read_bytes()
+    outputs = {res.output for res in results}
+    assert len(outputs) == 2, outputs
+    assert len(claimed) == 2
+
+
+@needs_ffmpeg
+def test_overwrite_replaces_existing_file_without_suffix(media, tools, tmp_path):
+    """Один job: файл, лежавший до запуска, заменяется, суффикса нет."""
+    out = tmp_path / "out"
+    out.mkdir()
+    existing = out / "clip.gif"
+    existing.write_bytes(b"old gif")
+
+    result = convert_file(media["clip"], fm.BY_KEY["gif"], fm.ConvertOptions(overwrite=True),
+                          tools, out, claimed=set())
+
+    assert result.output == existing
+    assert existing.stat().st_size > 1000
+    assert sorted(p.name for p in out.iterdir()) == ["clip.gif"]
+
+
+@needs_ffmpeg
+def test_without_claimed_behaves_as_before(media, tools, tmp_path):
+    """claimed=None — прежнее поведение: имя как есть, без суффиксов."""
+    out = tmp_path / "out"
+    out.mkdir()
+    one = tmp_path / "one"
+    two = tmp_path / "two"
+    for d in (one, two):
+        d.mkdir()
+    shutil.copyfile(media["clip"], one / "a.mp4")
+    shutil.copyfile(media["silent"], two / "a.mp4")
+
+    first = convert_file(one / "a.mp4", fm.BY_KEY["gif"], fm.ConvertOptions(overwrite=True),
+                         tools, out, claimed=None)
+    second = convert_file(two / "a.mp4", fm.BY_KEY["gif"], fm.ConvertOptions(overwrite=True),
+                          tools, out, claimed=None)
+
+    # без claimed второй результат затирает первый — так было и раньше
+    assert first.output == second.output == out / "a.gif"
+    assert sorted(p.name for p in out.iterdir()) == ["a.gif"]
+
+
+@needs_ffmpeg
+def test_second_engine_start_overwrites_again(media, tools, tmp_path):
+    """Новый прогон снова перезаписывает a.gif, а не делает a (1).gif."""
+    out = tmp_path / "out"
+    out.mkdir()
+    src = tmp_path / "a.mp4"
+    shutil.copyfile(media["clip"], src)
+    opts = fm.ConvertOptions(overwrite=True)
+
+    def run_once() -> list[str]:
+        job = Job(src=src, info=probe(src, tools), target=fm.BY_KEY["gif"])
+        engine = Engine(tools=tools, options=opts, on_event=lambda e, j: None, max_workers=1)
+        engine.start([job], out)
+        assert _wait_for(lambda: not engine.running, 120)
+        assert job.status == STATUS_DONE, job.message
+        return sorted(p.name for p in out.iterdir())
+
+    assert run_once() == ["a.gif"]
+    assert run_once() == ["a.gif"], "второй запуск начал создавать суффиксы"

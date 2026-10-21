@@ -455,10 +455,14 @@ def _convert_image_ffmpeg(
 # Публичный API
 # --------------------------------------------------------------------------- #
 
+# имена, занятые задачами одного запуска, меняются из нескольких потоков
+_claim_lock = threading.Lock()
+
 
 def unique_path(
     directory: Path, stem: str, ext: str,
     overwrite: bool = False, *, reserve: bool = True,
+    taken: set[Path] | None = None,
 ) -> Path:
     """Свободное имя в `directory`, которое не достанется другому потоку.
 
@@ -471,15 +475,21 @@ def unique_path(
     `reserve=False` — только подобрать свободное имя, ничего не создавая
     (нужно, если файл создаст кто-то другой). Права 0o666, как у обычного
     `open()`, — umask процесса применяется к ним как всегда.
+
+    `taken` — имена, уже занятые задачами текущего запуска: их пропускаем,
+    даже если файла на диске ещё нет (результат пишется в `.part`).
     """
     directory.mkdir(parents=True, exist_ok=True)
     candidate = directory / f"{stem}.{ext}"
-    if overwrite:
+    if overwrite and not (taken and candidate.resolve() in taken):
         return candidate           # явная перезапись: имя как есть, без брони
     i = 0
     while True:
         if i:
             candidate = directory / f"{stem} ({i}).{ext}"
+        if taken is not None and candidate.resolve() in taken:
+            i += 1
+            continue
         if reserve:
             try:
                 fd = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666)
@@ -513,6 +523,8 @@ def convert_file(
     info: MediaInfo | None = None,
     on_progress: ProgressCB | None = None,
     cancel: threading.Event | None = None,
+    *,
+    claimed: set[Path] | None = None,
 ) -> ConversionResult:
     src = Path(src)
     if info is None:
@@ -531,7 +543,16 @@ def convert_file(
     overwrite = opts.overwrite
     if overwrite and (out_dir / f"{src.stem}.{ext}").resolve() == src.resolve():
         overwrite = False
-    dst = unique_path(out_dir, src.stem, ext, overwrite)
+    claim_key: Path | None = None
+    if claimed is None:
+        dst = unique_path(out_dir, src.stem, ext, overwrite)
+    else:
+        # «Перезапись» относится к тому, что лежало до запуска, а не к результату
+        # соседней задачи: имя занимается на время запуска под общим локом.
+        with _claim_lock:
+            dst = unique_path(out_dir, src.stem, ext, overwrite, taken=claimed)
+            claim_key = dst.resolve()
+            claimed.add(claim_key)
     # Пишем в <имя>.part.<ext> и публикуем os.replace по успеху: ошибка не
     # уничтожает уже существующий файл, а замена атомарна. Расширение в имени
     # сохраняем — ffmpeg и Pillow выбирают формат по нему, а не по «.part».
@@ -589,6 +610,10 @@ def convert_file(
             raise ConvertError("ffmpeg не создал выходной файл")
         _publish(tmp, dst)            # атомарная подмена результата
     except BaseException:
+        if claim_key is not None and claimed is not None:
+            # неудачная задача освобождает имя: соседняя может им воспользоваться
+            with _claim_lock:
+                claimed.discard(claim_key)
         _cleanup(tmp)
         if not overwrite:
             # при overwrite=False dst — наша же пустая заглушка; чужой файл

@@ -82,6 +82,8 @@ class Engine:
         self._done_count = 0
         self._remaining = 0
         self._last_emit: dict[str, float] = {}
+        # имена результатов, занятые задачами текущего запуска
+        self._claimed: set[Path] = set()
 
     # ------------------------------------------------------------------ #
     @property
@@ -103,6 +105,7 @@ class Engine:
         self._done_count = 0
         self._remaining = len(jobs)
         self._last_emit.clear()
+        self._claimed = set()          # новый запуск снова может перезаписывать
         self._pool = ThreadPoolExecutor(max_workers=self.max_workers,
                                         thread_name_prefix="mediaforge")
         for job in jobs:
@@ -152,6 +155,7 @@ class Engine:
                 job.src, job.target, self.options, self.tools, out_dir,
                 info=job.info, on_progress=progress,
                 cancel=_AnyCancel(self._cancel, job.cancel),
+                claimed=self._claimed,
             )
             job.output = result.output
             job.message = result.note
