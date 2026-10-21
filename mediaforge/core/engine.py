@@ -103,16 +103,13 @@ class Engine:
 
     # ------------------------------------------------------------------ #
     def _run_one(self, job: Job, default_out_dir: Path) -> None:
+        # Отмена могла случиться раньше, чем пул взял задачу: такой выход
+        # обязан пройти через тот же finally, иначе _remaining не уменьшится
+        # и движок навсегда останется в состоянии running.
         with self._lock:
-            if self._cancel.is_set():
-                job.status = STATUS_CANCELLED
-                self._emit("cancelled", job)
-                return
             self._running += 1
-        job.status = STATUS_RUNNING
-        job.progress = 0.0
+            cancelled_before_start = self._cancel.is_set()
         started = time.monotonic()
-        self._emit("start", job)
 
         def progress(p: float, speed: str) -> None:
             job.progress = p
@@ -126,6 +123,16 @@ class Engine:
 
         out_dir = job.out_dir or default_out_dir
         try:
+            if cancelled_before_start:
+                job.status = STATUS_CANCELLED
+                job.message = "Отменено"
+                self._emit("cancelled", job)
+                return
+
+            job.status = STATUS_RUNNING
+            job.progress = 0.0
+            self._emit("start", job)
+
             result = convert_file(
                 job.src, job.target, self.options, self.tools, out_dir,
                 info=job.info, on_progress=progress, cancel=self._cancel,

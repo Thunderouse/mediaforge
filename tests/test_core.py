@@ -8,19 +8,38 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import threading
+import time
 from pathlib import Path
 
 import pytest
 
+from mediaforge.core import engine as engine_mod
 from mediaforge.core import formats as fm
-from mediaforge.core.convert import (ConvertError, build_audio_cmd, build_gif_cmd,
-                                     build_video_cmd, convert_file,
-                                     target_image_size, trim_plan, unique_path)
 from mediaforge.core import preview as pv
 from mediaforge.core import updates
+from mediaforge.core.convert import (
+    Cancelled,
+    ConversionResult,
+    ConvertError,
+    build_audio_cmd,
+    build_gif_cmd,
+    build_video_cmd,
+    convert_file,
+    target_image_size,
+    trim_plan,
+    unique_path,
+)
+from mediaforge.core.engine import STATUS_CANCELLED, STATUS_DONE, Engine, Job
+from mediaforge.core.ffmpeg import (
+    MediaInfo,
+    Tools,
+    human_duration,
+    human_size,
+    iter_media_files,
+    probe,
+)
 from mediaforge.core.timecode import format_timecode, parse_timecode
-from mediaforge.core.ffmpeg import (MediaInfo, Tools, human_duration, human_size,
-                                   iter_media_files, probe)
 
 FFMPEG = shutil.which("ffmpeg")
 needs_ffmpeg = pytest.mark.skipif(not FFMPEG, reason="нет ffmpeg в системе")
@@ -516,3 +535,97 @@ def test_check_latest_errors():
         updates.check_latest("1.0.0", fetcher=broken)
     with pytest.raises(updates.UpdateError):
         updates.check_latest("1.0.0", fetcher=lambda repo: {"html_url": "x"})
+
+
+# --------------------------------------------------------------------------- #
+# Отмена в очереди (регрессия: движок навсегда оставался в running)
+# --------------------------------------------------------------------------- #
+def _wait_for(predicate, timeout: float = 5.0) -> bool:
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return bool(predicate())
+
+
+def _fake_jobs(count: int, tmp_path: Path) -> list[Job]:
+    return [
+        Job(src=tmp_path / f"clip{i}.mp4",
+            info=MediaInfo(path=tmp_path / f"clip{i}.mp4", kind="video", duration=1.0),
+            target=fm.BY_KEY["mp4"])
+        for i in range(count)
+    ]
+
+
+def test_cancel_before_start_releases_engine(monkeypatch, tmp_path):
+    """5 задач, 2 потока, «Остановить» сразу: две в работе, три ещё в очереди."""
+    events: list[str] = []
+    started = threading.Event()
+    release = threading.Event()
+
+    def fake_convert(*args, **kwargs):
+        cancel = kwargs.get("cancel")
+        started.set()
+        release.wait(3.0)
+        if cancel is not None and cancel.is_set():
+            raise Cancelled()
+        return ConversionResult(output=tmp_path / "out.mp4")
+
+    monkeypatch.setattr(engine_mod, "convert_file", fake_convert)
+    jobs = _fake_jobs(5, tmp_path)
+    engine = Engine(tools=object(), options=fm.ConvertOptions(),
+                    on_event=lambda event, job: events.append(event), max_workers=2)
+
+    engine.start(jobs, tmp_path)
+    assert started.wait(3.0), "воркеры не успели взять ни одной задачи"
+    assert engine.running is True
+
+    engine.stop()          # два ffmpeg уже работают, три задачи ещё в очереди
+    release.set()
+
+    assert _wait_for(lambda: events.count("finished") > 0), \
+        "движок не прислал finished — остался в running"
+    assert [job.status for job in jobs] == [STATUS_CANCELLED] * 5
+    assert events.count("finished") == 1
+    assert events.count("cancelled") == 5
+    assert engine.running is False
+    assert engine._remaining == 0
+
+
+def test_cancel_midway_keeps_engine_consistent(monkeypatch, tmp_path):
+    """Отмена в середине: часть задач успевает завершиться, часть отменяется."""
+    events: list[str] = []
+    stats = {"started": 0}
+    lock = threading.Lock()
+    second_started = threading.Event()
+
+    def fake_convert(*args, **kwargs):
+        cancel = kwargs.get("cancel")
+        with lock:
+            stats["started"] += 1
+            number = stats["started"]
+        if number == 1:
+            time.sleep(0.02)
+            return ConversionResult(output=tmp_path / "first.mp4")
+        second_started.set()
+        while not (cancel is not None and cancel.is_set()):
+            time.sleep(0.01)
+        raise Cancelled()
+
+    monkeypatch.setattr(engine_mod, "convert_file", fake_convert)
+    jobs = _fake_jobs(5, tmp_path)
+    engine = Engine(tools=object(), options=fm.ConvertOptions(),
+                    on_event=lambda event, job: events.append(event), max_workers=2)
+
+    engine.start(jobs, tmp_path)
+    assert second_started.wait(3.0), "вторая задача не стартовала"
+    engine.stop()
+
+    assert _wait_for(lambda: events.count("finished") == 1), \
+        "finished не пришёл или пришёл не один раз"
+    statuses = [job.status for job in jobs]
+    assert statuses.count(STATUS_DONE) == 1
+    assert statuses.count(STATUS_CANCELLED) == 4
+    assert engine.running is False
+    assert engine._remaining == 0
