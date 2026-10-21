@@ -755,3 +755,76 @@ def test_run_ffmpeg_cancel_during_noisy_stderr(tools, tmp_path):
     with pytest.raises(Cancelled):
         run_ffmpeg(cmd, duration=60.0, cancel=cancel)
     assert time.monotonic() - started < 10.0
+
+
+# --------------------------------------------------------------------------- #
+# Атомарный выбор имени (регрессия: два потока писали в один файл)
+# --------------------------------------------------------------------------- #
+def test_unique_path_is_atomic_under_threads(tmp_path):
+    """Barrier + 2 потока: имена разные, оба файла забронированы пустыми."""
+    barrier = threading.Barrier(2, timeout=10)
+    lock = threading.Lock()
+    results: list[Path] = []
+
+    def worker() -> None:
+        barrier.wait()
+        path = unique_path(tmp_path, "a", "ext")
+        with lock:
+            results.append(path)
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(10)
+        assert not thread.is_alive()
+
+    assert len(results) == 2
+    assert results[0] != results[1], "оба потока получили одно имя"
+    for path in results:
+        assert path.exists(), f"имя не забронировано: {path}"
+        assert path.stat().st_size == 0
+
+
+def test_unique_path_sequential_suffixes(tmp_path):
+    names = [unique_path(tmp_path, "a", "ext").name for _ in range(3)]
+    assert names == ["a.ext", "a (1).ext", "a (2).ext"]
+
+
+def test_unique_path_overwrite_returns_name_as_is(tmp_path):
+    existing = tmp_path / "a.ext"
+    existing.write_text("данные", encoding="utf-8")
+    assert unique_path(tmp_path, "a", "ext", overwrite=True) == existing
+    # перезапись ничего не бронирует и не трогает чужой файл
+    assert existing.read_text(encoding="utf-8") == "данные"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["a.ext"]
+
+
+def test_unique_path_without_reservation_keeps_old_behaviour(tmp_path):
+    """reserve=False — только выбор имени, файлов не создаёт."""
+    first = unique_path(tmp_path, "a", "ext", reserve=False)
+    assert first == tmp_path / "a.ext"
+    assert list(tmp_path.iterdir()) == []
+
+
+@needs_ffmpeg
+def test_ffmpeg_overwrites_reserved_placeholder(media, tools, tmp_path):
+    """Заглушка не мешает записи: ffmpeg с -y пишет поверх пустого файла."""
+    src = media["clip"]
+    dst = unique_path(tmp_path, "reserved", "mp4")
+    assert dst.stat().st_size == 0
+    cmd, _note = build_video_cmd(src, dst, probe(src, tools), fm.BY_KEY["mp4"],
+                                 fm.ConvertOptions(), tools)
+    run_ffmpeg(cmd)
+    assert dst.stat().st_size > 0
+
+
+@needs_ffmpeg
+def test_failed_conversion_leaves_no_placeholder(media, tools, tmp_path):
+    """Ошибка конвертации не оставляет пустых заглушек в папке назначения."""
+    out = tmp_path / "out"
+    out.mkdir()
+    # в silent.mp4 нет звуковой дорожки — извлечение mp3 падает
+    with pytest.raises(ConvertError):
+        convert_file(media["silent"], fm.BY_KEY["mp3"], fm.ConvertOptions(), tools, out)
+    assert list(out.iterdir()) == [], [p.name for p in out.iterdir()]

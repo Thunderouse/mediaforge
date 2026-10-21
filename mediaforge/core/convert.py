@@ -407,16 +407,42 @@ def _convert_image_ffmpeg(
 # --------------------------------------------------------------------------- #
 
 
-def unique_path(directory: Path, stem: str, ext: str, overwrite: bool = False) -> Path:
+def unique_path(
+    directory: Path, stem: str, ext: str, overwrite: bool = False, reserve: bool = True,
+) -> Path:
+    """Свободное имя в `directory`, которое не достанется другому потоку.
+
+    Проверять `exists()` и создавать файл позже нельзя: между проверкой и
+    запуском ffmpeg имя успевает занять второй поток (TOCTOU), и два процесса
+    пишут в один файл. Поэтому при `reserve=True` имя бронируется пустым
+    файлом через O_CREAT|O_EXCL — атомарно на уровне ФС. Флаг `-y` у ffmpeg
+    и запись Pillow перезаписывают заглушку молча.
+    """
     directory.mkdir(parents=True, exist_ok=True)
     candidate = directory / f"{stem}.{ext}"
     if overwrite:
-        return candidate
-    i = 1
-    while candidate.exists():
-        candidate = directory / f"{stem} ({i}).{ext}"
+        return candidate           # явная перезапись: имя как есть, без брони
+    i = 0
+    while True:
+        if i:
+            candidate = directory / f"{stem} ({i}).{ext}"
+        if reserve:
+            try:
+                # 0o666 без umask-сюрпризов: права как у обычного файла
+                fd = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666)
+            except FileExistsError:
+                i += 1
+                continue
+            except OSError:
+                # нет прав/странная ФС — откатываемся к старой проверке
+                if not candidate.exists():
+                    return candidate
+            else:
+                os.close(fd)
+                return candidate
+        elif not candidate.exists():
+            return candidate
         i += 1
-    return candidate
 
 
 @dataclass
@@ -448,9 +474,11 @@ def convert_file(
         target.key == "gif" and info.kind == "image"
     )
     ext = "gif" if target.key.startswith("gif") else target.ext
-    dst = unique_path(out_dir, src.stem, ext, opts.overwrite)
-    if dst.resolve() == src.resolve():
-        dst = unique_path(out_dir, src.stem, ext, overwrite=False)
+    # не пишем поверх исходника: при совпадении имени бронируем следующее
+    overwrite = opts.overwrite
+    if overwrite and (out_dir / f"{src.stem}.{ext}").resolve() == src.resolve():
+        overwrite = False
+    dst = unique_path(out_dir, src.stem, ext, overwrite)
 
     try:
         if is_image_path:
