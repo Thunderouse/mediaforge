@@ -309,14 +309,22 @@ def build_audio_cmd(
 _IMG_MAX_EDGE = {"2160": 2160, "1440": 1440, "1080": 1080, "720": 720, "480": 480}
 
 
+def _check_cancel(cancel: threading.Event | None) -> None:
+    if cancel is not None and cancel.is_set():
+        raise Cancelled()
+
+
 def _convert_image_pillow(
     src: Path, dst: Path, target: fm.Target, opts: fm.ConvertOptions,
+    cancel: threading.Event | None = None,
 ) -> None:
     from PIL import Image, ImageOps  # мягкая зависимость
 
+    _check_cancel(cancel)
     quality, level = _IMG_QUALITY[opts.quality]
     with Image.open(src) as im:
         im = ImageOps.exif_transpose(im)
+        _check_cancel(cancel)
         new_size = target_image_size(im.size, opts)
         if new_size != im.size:
             resample = {
@@ -325,6 +333,7 @@ def _convert_image_pillow(
                 "nearest": Image.NEAREST,
             }.get(opts.image_filter, Image.LANCZOS)
             im = im.resize(new_size, resample)
+            _check_cancel(cancel)
 
         key = target.key
         params: dict = {}
@@ -369,22 +378,24 @@ def _convert_image_pillow(
             params = {"resolution": 150.0}
         else:
             raise ConvertError(f"Формат {target.label} не поддерживается")
+        _check_cancel(cancel)
         im.save(dst, **params)
 
 
 def _convert_image_ffmpeg(
     src: Path, dst: Path, target: fm.Target, opts: fm.ConvertOptions, tools: Tools,
-    info: MediaInfo | None = None,
+    info: MediaInfo | None = None, cancel: threading.Event | None = None,
 ) -> None:
     quality, _ = _IMG_QUALITY[opts.quality]
     info = info or probe(src, tools)
     info_size = (info.width or 0, info.height or 0)
-    target = target_image_size(info_size, opts) if all(info_size) else info_size
+    # NB: не называть это `target` — затрёт объект формата (fm.Target)
+    new_size = target_image_size(info_size, opts) if all(info_size) else info_size
     flags = {"lanczos": "lanczos", "bicubic": "bicubic", "nearest": "neighbor"}.get(
         opts.image_filter, "lanczos")
     vf = []
-    if target and all(info_size) and target != info_size:
-        vf = ["-vf", f"scale={target[0]}:{target[1]}:flags={flags}"]
+    if new_size and all(info_size) and new_size != info_size:
+        vf = ["-vf", f"scale={new_size[0]}:{new_size[1]}:flags={flags}"]
     cmd = [tools.ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
            "-i", str(src), "-frames:v", "1"]
     if target.key == "avif":
@@ -399,7 +410,7 @@ def _convert_image_ffmpeg(
     else:
         cmd += ["-q:v", str(max(1, min(31, 31 - quality // 4)))]
     cmd += [*vf, str(dst)]
-    run_ffmpeg(cmd)
+    run_ffmpeg(cmd, cancel=cancel)
 
 
 # --------------------------------------------------------------------------- #
@@ -489,11 +500,11 @@ def convert_file(
             if on_progress:
                 on_progress(0.05, "")
             try:
-                _convert_image_pillow(src, tmp, target, opts)
+                _convert_image_pillow(src, tmp, target, opts, cancel)
             except ImportError:
                 if tools is None:
                     raise ConvertError("Для этого формата нужен ffmpeg или Pillow")
-                _convert_image_ffmpeg(src, tmp, target, opts, tools, info)
+                _convert_image_ffmpeg(src, tmp, target, opts, tools, info, cancel)
             if on_progress:
                 on_progress(1.0, "")
         elif target.key == "gif":

@@ -884,3 +884,105 @@ def test_overwrite_cancel_keeps_existing_file(media, tools, tmp_path):
 
     assert existing.read_bytes() == b"old gif"
     assert [p.name for p in out.iterdir()] == ["clip.gif"]
+
+
+# --------------------------------------------------------------------------- #
+# Отмена для изображений (Pillow-ветка раньше не читала cancel)
+# --------------------------------------------------------------------------- #
+def _big_png(path: Path, side: int = 2200) -> bool:
+    try:
+        from PIL import Image
+    except ImportError:
+        return False
+    im = Image.new("RGB", (side, side))
+    px = im.load()
+    for y in range(side):
+        for x in range(0, side, 7):
+            px[x, y] = ((x * 3) % 256, (y * 5) % 256, ((x + y) * 2) % 256)
+    im.save(path)
+    return True
+
+
+def test_image_conversion_cancelled_before_start(tmp_path):
+    """cancel взведён до вызова: Cancelled, в папке пусто."""
+    src = tmp_path / "big.png"
+    if not _big_png(src):
+        pytest.skip("нет Pillow")
+    out = tmp_path / "out"
+    out.mkdir()
+    cancel = threading.Event()
+    cancel.set()
+
+    with pytest.raises(Cancelled):
+        convert_file(src, fm.BY_KEY["webp"], fm.ConvertOptions(),
+                     tools=None, out_dir=out, cancel=cancel)
+
+    assert list(out.iterdir()) == [], [p.name for p in out.iterdir()]
+    assert not (out / "big.webp").exists()
+
+
+def test_image_conversion_without_cancel(tmp_path):
+    """Без отмены картинка конвертируется как раньше."""
+    src = tmp_path / "pic.png"
+    if not _big_png(src, side=300):
+        pytest.skip("нет Pillow")
+    out = tmp_path / "out"
+    out.mkdir()
+
+    result = convert_file(src, fm.BY_KEY["webp"], fm.ConvertOptions(),
+                          tools=None, out_dir=out)
+
+    assert result.output.name == "pic.webp"
+    assert result.output.stat().st_size > 0
+    from PIL import Image
+    with Image.open(result.output) as im:
+        assert im.format == "WEBP"
+        assert im.size == (300, 300)
+
+
+def test_image_cancel_midway_leaves_no_file(tmp_path, monkeypatch):
+    """Отмена между этапами Pillow: файл не создаётся, заглушки убраны."""
+    src = tmp_path / "pic.png"
+    if not _big_png(src, side=400):
+        pytest.skip("нет Pillow")
+    out = tmp_path / "out"
+    out.mkdir()
+    cancel = threading.Event()
+
+    import mediaforge.core.convert as conv
+    real_size = conv.target_image_size
+
+    def size_and_cancel(size, opts):
+        # отмена приходит уже после открытия файла — как в реальной работе
+        cancel.set()
+        return real_size(size, opts)
+
+    monkeypatch.setattr(conv, "target_image_size", size_and_cancel)
+
+    with pytest.raises(Cancelled):
+        convert_file(src, fm.BY_KEY["jpg"], fm.ConvertOptions(),
+                     tools=None, out_dir=out, cancel=cancel)
+
+    assert list(out.iterdir()) == []
+
+
+@needs_ffmpeg
+def test_image_ffmpeg_fallback_respects_cancel(media, tools, tmp_path, monkeypatch):
+    """Ветка отката на ffmpeg тоже уважает отмену."""
+    out = tmp_path / "out"
+    out.mkdir()
+    cancel = threading.Event()
+    cancel.set()
+
+    import mediaforge.core.convert as conv
+
+    def no_pillow(*_args, **_kwargs):
+        raise ImportError("нет Pillow")
+
+    monkeypatch.setattr(conv, "_convert_image_pillow", no_pillow)
+
+    with pytest.raises(Cancelled):
+        convert_file(media["png"], fm.BY_KEY["webp"], fm.ConvertOptions(),
+                     tools=tools, out_dir=out, cancel=cancel)
+
+    assert list(out.iterdir()) == []
