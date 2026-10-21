@@ -5,30 +5,60 @@ from __future__ import annotations
 import threading
 from pathlib import Path
 
-from PySide6.QtCore import (QPointF, QRectF, QRegularExpression, QSize, Qt,
-                            QTimer, Signal, QObject)
-from PySide6.QtGui import (QColor, QIcon, QLinearGradient,
-                           QPainter, QPainterPath, QPixmap,
-                           QRegularExpressionValidator, QShortcut, QKeySequence)
-from PySide6.QtWidgets import (QApplication, QComboBox, QFileDialog,
-                               QFrame, QGridLayout, QHBoxLayout, QLabel,
-                               QLineEdit, QMainWindow, QMessageBox, QPushButton,
-                               QScrollArea, QSizePolicy, QStackedWidget,
-                               QVBoxLayout, QWidget)
+from PySide6.QtCore import QObject, QPointF, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import (
+    QColor,
+    QIcon,
+    QKeySequence,
+    QLinearGradient,
+    QPainter,
+    QPainterPath,
+    QPixmap,
+    QShortcut,
+)
+from PySide6.QtWidgets import (
+    QApplication,
+    QFileDialog,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QMainWindow,
+    QMessageBox,
+    QPushButton,
+    QScrollArea,
+    QSizePolicy,
+    QStackedWidget,
+    QVBoxLayout,
+    QWidget,
+)
 
 from ..core import formats as fm
 from ..core import updates
 from ..core.config import APP_NAME, APP_VERSION, Settings
-from ..core.engine import (STATUS_CANCELLED, STATUS_DONE, STATUS_ERROR,
-                           STATUS_PENDING, STATUS_RUNNING, Engine, Job)
-from ..core.ffmpeg import (AUDIO_EXT, IMAGE_EXT, VIDEO_EXT,
-                           MediaInfo, Tools, guess_kind, human_size,
-                           iter_media_files, probe)
-from ..core.timecode import format_timecode, parse_timecode
+from ..core.engine import (
+    STATUS_CANCELLED,
+    STATUS_DONE,
+    STATUS_ERROR,
+    STATUS_PENDING,
+    STATUS_RUNNING,
+    Engine,
+    Job,
+)
+from ..core.ffmpeg import (
+    AUDIO_EXT,
+    IMAGE_EXT,
+    VIDEO_EXT,
+    MediaInfo,
+    Tools,
+    guess_kind,
+    human_size,
+    iter_media_files,
+    probe,
+)
 from . import icons, theme
+from .options_sidebar import OptionsSidebar
 from .preview import PreviewPanel
-from .widgets import (CheckBox, Combo, DropZone, IconButton, JobRow,
-                      ProgressLine, Segmented)
+from .widgets import Combo, DropZone, IconButton, JobRow, ProgressLine, Segmented
 
 
 class Bridge(QObject):
@@ -322,292 +352,16 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------------ #
     def _build_sidebar(self) -> QWidget:
-        side = QFrame()
-        side.setObjectName("sidebar")
-        side.setFixedWidth(320)
-        outer = QVBoxLayout(side)
-        outer.setContentsMargins(0, 0, 0, 0)
-        outer.setSpacing(0)
-
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        inner = QWidget()
-        lay = QVBoxLayout(inner)
-        lay.setContentsMargins(16, 14, 16, 10)
-        lay.setSpacing(8)
-
-        opts = self.settings.options()
-
-        lay.addWidget(self._section("Качество"))
-        self.seg_quality = Segmented(fm.QUALITY_LABELS)
-        self.seg_quality.setValue(opts.quality)
-        self.seg_quality.changed.connect(lambda v: self._set_opt("quality", v))
-        lay.addWidget(self.seg_quality)
-
-        lay.addSpacing(2)
-        lay.addWidget(self._field_label("Разрешение"))
-        self.cmb_resolution = Combo()
-        self._fill(self.cmb_resolution, fm.RESOLUTIONS, opts.resolution)
-        self.cmb_resolution.currentIndexChanged.connect(
-            lambda: self._set_opt("resolution", self.cmb_resolution.currentData()))
-        lay.addWidget(self.cmb_resolution)
-
-        # --- изображения ---
-        self.image_box = QWidget()
-        il = QVBoxLayout(self.image_box)
-        il.setContentsMargins(0, 4, 0, 0)
-        il.setSpacing(6)
-        il.addWidget(self._divider())
-        il.addWidget(self._section("Изображения"))
-        il.addWidget(self._field_label("Размер"))
-
-        self.cmb_image_scale = Combo()
-        self.cmb_image_scale.addItem("Не менять", None)
-        for percent in fm.IMAGE_PERCENTS:
-            self.cmb_image_scale.addItem(f"{percent} %", percent)
-        self.cmb_image_scale.addItem("Свой размер, px", "custom")
-        current = (opts.image_percent if opts.image_scale == "percent"
-                   else "custom" if opts.image_scale == "size" else None)
-        index = self.cmb_image_scale.findData(current)
-        self.cmb_image_scale.setCurrentIndex(index if index >= 0 else 0)
-        self.cmb_image_scale.currentIndexChanged.connect(self._on_image_scale)
-        il.addWidget(self.cmb_image_scale)
-
-        self.image_size_row = QWidget()
-        rl = QHBoxLayout(self.image_size_row)
-        rl.setContentsMargins(0, 0, 0, 0)
-        rl.setSpacing(6)
-        self.edit_img_w = QLineEdit(str(opts.image_width or ""))
-        self.edit_img_w.setPlaceholderText("ширина")
-        self.edit_img_h = QLineEdit(str(opts.image_height or ""))
-        self.edit_img_h.setPlaceholderText("высота")
-        validator = QRegularExpressionValidator(QRegularExpression(r"^[0-9]{0,5}$"))
-        for edit, which in ((self.edit_img_w, "w"), (self.edit_img_h, "h")):
-            edit.setValidator(validator)
-            edit.textChanged.connect(
-                lambda _text, side=which: self._on_image_size_edited(side))
-        times = QLabel("×")
-        times.setFixedWidth(12)
-        times.setAlignment(Qt.AlignCenter)
-        rl.addWidget(self.edit_img_w, 1)
-        rl.addWidget(times)
-        rl.addWidget(self.edit_img_h, 1)
-        il.addWidget(self.image_size_row)
-
-        self.chk_ratio = CheckBox("Сохранять пропорции")
-        self.chk_ratio.setChecked(opts.image_keep_ratio)
-        self.chk_ratio.setToolTip(
-            "Пустое поле — сторона считается по пропорциям. Снимите флажок, "
-            "чтобы задать точные размеры (картинка может исказиться).")
-        self.chk_ratio.toggled.connect(self._on_ratio_toggled)
-        il.addWidget(self.chk_ratio)
-
-        il.addWidget(self._field_label("Метод"))
-        self.cmb_image_filter = Combo()
-        self._fill(self.cmb_image_filter, fm.IMAGE_FILTERS, opts.image_filter)
-        self.cmb_image_filter.currentIndexChanged.connect(
-            lambda: self._set_opt("image_filter", self.cmb_image_filter.currentData()))
-        il.addWidget(self.cmb_image_filter)
-
-        self.chk_upscale = CheckBox("Разрешение может увеличивать")
-        self.chk_upscale.setChecked(opts.image_allow_upscale)
-        self.chk_upscale.setToolTip(
-            "Влияет только на список «Разрешение»: без флажка маленькая картинка "
-            "не растягивается до 1080p. Проценты и «Свой размер» применяются "
-            "всегда — это прямое указание.")
-        self.chk_upscale.toggled.connect(lambda v: self._set_opt("image_allow_upscale", v))
-        il.addWidget(self.chk_upscale)
-
-        lay.addWidget(self.image_box)
-
-        # --- фрагмент ---
-        self.trim_box = QWidget()
-        tl = QVBoxLayout(self.trim_box)
-        tl.setContentsMargins(0, 4, 0, 0)
-        tl.setSpacing(6)
-        tl.addWidget(self._divider())
-        self.trim_title = self._section("Фрагмент · весь файл")
-        tl.addWidget(self.trim_title)
-        trim_row = QHBoxLayout()
-        trim_row.setSpacing(8)
-        pattern = QRegularExpression(r"^[0-9]{0,3}([:.,][0-9]{0,3}){0,3}$")
-        # NB: не называть переменную side — это имя виджета-сайдбара выше
-        for caption, layout_attr, value in (("С начала", "edit_trim_start", opts.trim_start),
-                                           ("По", "edit_trim_end", opts.trim_end)):
-            col = QVBoxLayout()
-            col.setSpacing(4)
-            col.addWidget(self._field_label(caption))
-            edit = QLineEdit(format_timecode(value) if value else "")
-            edit.setValidator(QRegularExpressionValidator(pattern, edit))
-            edit.setPlaceholderText("0:00" if caption == "С начала" else "конец")
-            edit.setClearButtonEnabled(True)
-            edit.textChanged.connect(self._on_trim_edited)
-            col.addWidget(edit)
-            trim_row.addLayout(col, 1)
-            setattr(self, layout_attr, edit)
-        tl.addLayout(trim_row)
-        lay.addWidget(self.trim_box)
-
-        # --- блок GIF ---
-        self.gif_box = QWidget()
-        gl = QVBoxLayout(self.gif_box)
-        gl.setContentsMargins(0, 4, 0, 0)
-        gl.setSpacing(6)
-        gl.addWidget(self._divider())
-        gl.addWidget(self._section("Анимация GIF"))
-        row = QHBoxLayout()
-        row.setSpacing(8)
-        col_fps = QVBoxLayout()
-        col_fps.setSpacing(4)
-        col_fps.addWidget(self._field_label("Кадров в секунду"))
-        self.cmb_gif_fps = Combo()
-        self._fill(self.cmb_gif_fps, tuple((x, x + " fps") for x in fm.GIF_FPS), opts.gif_fps)
-        self.cmb_gif_fps.currentIndexChanged.connect(
-            lambda: self._set_opt("gif_fps", self.cmb_gif_fps.currentData()))
-        col_fps.addWidget(self.cmb_gif_fps)
-        row.addLayout(col_fps, 1)
-        gl.addLayout(row)
-        gif_scale_hint = QLabel("Масштаб — из «Разрешения» выше")
-        gif_scale_hint.setObjectName("hint")
-        gl.addWidget(gif_scale_hint)
-        self.chk_loop = CheckBox("Зациклить анимацию")
-        self.chk_loop.setChecked(opts.gif_loop)
-        self.chk_loop.toggled.connect(lambda v: self._set_opt("gif_loop", v))
-        gl.addWidget(self.chk_loop)
-        lay.addWidget(self.gif_box)
-
-        # --- блок аудио ---
-        self.audio_box = QWidget()
-        al = QVBoxLayout(self.audio_box)
-        al.setContentsMargins(0, 4, 0, 0)
-        al.setSpacing(8)
-        al.addWidget(self._divider())
-        al.addWidget(self._section("Звук"))
-        al.addWidget(self._field_label("Битрейт"))
-        self.cmb_bitrate = Combo()
-        self._fill(self.cmb_bitrate, tuple((b, b) for b in fm.AUDIO_BITRATES), opts.audio_bitrate)
-        self.cmb_bitrate.currentIndexChanged.connect(
-            lambda: self._set_opt("audio_bitrate", self.cmb_bitrate.currentData()))
-        al.addWidget(self.cmb_bitrate)
-        lay.addWidget(self.audio_box)
-
-        lay.addWidget(self._divider())
-        lay.addWidget(self._section("Дополнительно"))
-        grid = QGridLayout()
-        grid.setContentsMargins(0, 0, 0, 0)
-        grid.setHorizontalSpacing(10)
-        grid.setVerticalSpacing(2)
-
-        self.chk_metadata = CheckBox("Метаданные")
-        self.chk_metadata.setChecked(opts.keep_metadata)
-        self.chk_metadata.setToolTip("Сохранять метаданные исходника (EXIF, теги)")
-        self.chk_metadata.toggled.connect(lambda v: self._set_opt("keep_metadata", v))
-        grid.addWidget(self.chk_metadata, 0, 0)
-
-        self.chk_gpu = CheckBox("GPU-ускорение")
-        self.chk_gpu.setChecked(opts.gpu)
-        self.chk_gpu.setToolTip("Быстрее, если есть подходящая видеокарта. Иначе — CPU.")
-        self.chk_gpu.toggled.connect(lambda v: self._set_opt("gpu", v))
-        grid.addWidget(self.chk_gpu, 0, 1)
-
-        self.chk_gentle = CheckBox("Щадящий режим")
-        self.chk_gentle.setChecked(opts.gentle)
-        self.chk_gentle.setToolTip("Меньше потоков CPU и по одному файлу за раз")
-        self.chk_gentle.toggled.connect(lambda v: self._set_opt("gentle", v))
-        grid.addWidget(self.chk_gentle, 1, 0)
-
-        self.chk_overwrite = CheckBox("Перезапись")
-        self.chk_overwrite.setChecked(opts.overwrite)
-        self.chk_overwrite.setToolTip("Перезаписывать существующие файлы без суффикса «(1)»")
-        self.chk_overwrite.toggled.connect(lambda v: self._set_opt("overwrite", v))
-        grid.addWidget(self.chk_overwrite, 1, 1)
-        lay.addLayout(grid)
-
-        lay.addWidget(self._divider())
-        lay.addWidget(self._section("Куда сохранять"))
-        self.chk_source_dir = CheckBox("Рядом с исходным файлом")
-        self.chk_source_dir.setChecked(bool(self.settings.get("use_source_dir", True)))
-        self.chk_source_dir.toggled.connect(self._on_source_dir_toggled)
-        lay.addWidget(self.chk_source_dir)
-
-        row = QHBoxLayout()
-        row.setSpacing(6)
-        self.edit_out = QLineEdit(str(self.settings.get("out_dir") or ""))
-        self.edit_out.setPlaceholderText("Папка для результатов")
-        self.edit_out.setReadOnly(True)
-        self.btn_browse = IconButton("folder", "Выбрать папку", 17)
-        self.btn_browse.clicked.connect(self._pick_out_dir)
-        row.addWidget(self.edit_out, 1)
-        row.addWidget(self.btn_browse)
-        lay.addLayout(row)
-        self._on_source_dir_toggled(self.chk_source_dir.isChecked())
-        self._update_image_widgets()
-
-        lay.addStretch(1)
-        scroll.setWidget(inner)
-        outer.addWidget(scroll, 1)
-
-        # нижний блок закреплён — кнопка всегда на виду
-        bottom = QWidget()
-        bottom.setObjectName("sidebarBottom")
-        bottom.setAttribute(Qt.WA_StyledBackground, True)
-        bl = QVBoxLayout(bottom)
-        bl.setContentsMargins(16, 8, 16, 12)
-        bl.setSpacing(8)
-        self.summary = QLabel("")
-        self.summary.setObjectName("summary")
-        self.summary.setWordWrap(True)
-        bl.addWidget(self.summary)
-
-        self.btn_convert = QPushButton("Конвертировать")
-        self.btn_convert.setObjectName("primary")
-        self.btn_convert.setCursor(Qt.PointingHandCursor)
-        self.btn_convert.setFixedHeight(42)
-        self.btn_convert.clicked.connect(self.start_conversion)
-        bl.addWidget(self.btn_convert)
-
-        self.btn_cancel = QPushButton("Остановить")
-        self.btn_cancel.setObjectName("secondary")
-        self.btn_cancel.setCursor(Qt.PointingHandCursor)
-        self.btn_cancel.setFixedHeight(38)
-        self.btn_cancel.clicked.connect(self.cancel_conversion)
-        self.btn_cancel.setVisible(False)
-        bl.addWidget(self.btn_cancel)
-
-        hint = QLabel("Обработка локальная — файлы никуда не загружаются")
-        hint.setObjectName("hint")
-        hint.setWordWrap(True)
-        hint.setAlignment(Qt.AlignCenter)
-        bl.addWidget(hint)
-        outer.addWidget(bottom)
-        return side
-
-    def _field_label(self, text: str) -> QLabel:
-        lab = QLabel(text)
-        lab.setObjectName("hint")
-        return lab
-
-    def _section(self, text: str) -> QLabel:
-        lab = QLabel(text)
-        lab.setObjectName("sectionTitle")
-        return lab
-
-    def _divider(self) -> QWidget:
-        line = QFrame()
-        line.setObjectName("divider")
-        line.setFixedHeight(1)
-        return line
-
-    def _fill(self, combo: QComboBox, items, current: str) -> None:
-        combo.blockSignals(True)
-        combo.clear()
-        for key, label in items:
-            combo.addItem(label, key)
-        idx = combo.findData(current)
-        combo.setCurrentIndex(idx if idx >= 0 else 0)
-        combo.blockSignals(False)
+        """Правая колонка: параметры и кнопки живут в OptionsSidebar."""
+        self.sidebar = OptionsSidebar(self.settings)
+        self.sidebar.optionChanged.connect(self._set_opt)
+        self.sidebar.trimEdited.connect(
+            lambda start, end: self._apply_trim(start, end, from_preview=False))
+        self.sidebar.useSourceDirChanged.connect(self._on_source_dir_toggled)
+        self.sidebar.outDirChanged.connect(self._on_out_dir_changed)
+        self.sidebar.convertRequested.connect(self.start_conversion)
+        self.sidebar.cancelRequested.connect(self.cancel_conversion)
+        return self.sidebar
 
     def _fill_bulk_combo(self) -> None:
         combo = self.bulk_combo
@@ -826,18 +580,24 @@ class MainWindow(QMainWindow):
             self.preview.set_jobs(self.jobs)
 
     def _update_option_visibility(self) -> None:
-        has_media = any(j.info.kind in ("video", "audio") for j in self.jobs)
-        self.trim_box.setVisible(has_media)
-        self.image_box.setVisible(any(j.info.kind == "image" for j in self.jobs))
-        has_gif = any(j.target.key.startswith("gif") for j in self.jobs)
-        has_audio = any(j.target.kind == fm.KIND_AUDIO for j in self.jobs)
-        self.gif_box.setVisible(has_gif)
-        self.audio_box.setVisible(has_audio)
+        """Какие блоки параметров нужны для текущей очереди (сайдбар не знает Job)."""
+        self.sidebar.update_option_visibility(
+            has_media=any(j.info.kind in ("video", "audio") for j in self.jobs),
+            has_image=any(j.info.kind == "image" for j in self.jobs),
+            has_gif=any(j.target.key.startswith("gif") for j in self.jobs),
+            has_audio=any(j.target.kind == fm.KIND_AUDIO for j in self.jobs),
+        )
+        for job in self.jobs:
+            info = job.info
+            if info.kind == "image" and info.width and info.height:
+                self.sidebar.set_image_source_size(info.width, info.height)
+                return
+        self.sidebar.set_image_source_size(None, None)
 
     def _update_summary(self) -> None:
         n = len(self.jobs)
         if not n:
-            self.summary.setText("Перетащите файлы, чтобы начать")
+            self.sidebar.summary.setText("Перетащите файлы, чтобы начать")
             self._update_convert_button()
             return
         kinds = {j.info.kind for j in self.jobs}
@@ -847,7 +607,7 @@ class MainWindow(QMainWindow):
         kinds_text = " + ".join(parts)
         size_text = human_size(total)
         count = f"{n} {self._plural(n, 'файл', 'файла', 'файлов')}"
-        self.summary.setText(f"{count} · {kinds_text} · {size_text}" if n <= 3
+        self.sidebar.summary.setText(f"{count} · {kinds_text} · {size_text}" if n <= 3
                              else f"{count} · {size_text}")
         self._update_convert_button()
 
@@ -862,8 +622,8 @@ class MainWindow(QMainWindow):
     def _update_convert_button(self) -> None:
         busy = self._is_busy()
         ready = bool(self.jobs) and self.tools is not None and not busy
-        self.btn_convert.setEnabled(ready)
-        self.btn_cancel.setVisible(busy)
+        self.sidebar.btn_convert.setEnabled(ready)
+        self.sidebar.btn_cancel.setVisible(busy)
 
     def _is_busy(self) -> bool:
         return self.engine is not None and self.engine.running
@@ -878,68 +638,25 @@ class MainWindow(QMainWindow):
     def _on_source_dir_toggled(self, checked: bool) -> None:
         self.settings.set("use_source_dir", bool(checked))
         self.settings.save()
-        self.edit_out.setEnabled(not checked)
-        self.btn_browse.setEnabled(not checked)
-        if not checked and not self.edit_out.text():
-            self._pick_out_dir()
 
-    def _read_trim(self) -> tuple[float, float]:
-        """Разбирает поля фрагмента; ValueError — если время введено некорректно."""
-        start = parse_timecode(self.edit_trim_start.text()) or 0.0
-        end = parse_timecode(self.edit_trim_end.text()) or 0.0
-        if end and end <= start:
-            raise ValueError("Конец фрагмента должен быть больше начала")
-        return start, end
-
-    def _on_trim_edited(self, _text: str = "") -> None:
-        """Пользователь правит поля в сайдбаре."""
-        try:
-            start, end = self._read_trim()
-        except ValueError:
-            self._set_trim_state(None)
-            return
-        self._apply_trim(start, end, from_preview=False)
+    def _on_out_dir_changed(self, path: str) -> None:
+        self.settings.set("out_dir", path)
+        self.settings.save()
 
     def _on_preview_trim(self, start: float, end: float) -> None:
         """Фрагмент выставлен ручками на полоске кадров."""
         self._apply_trim(start, end, from_preview=True)
 
     def _apply_trim(self, start: float, end: float, from_preview: bool) -> None:
-        self._set_trim_state((start, end))
+        self.sidebar.apply_trim_state((start, end))
         self.settings.set("opt_trim_start", start)
         self.settings.set("opt_trim_end", end)
         if from_preview:
-            for edit, value in ((self.edit_trim_start, start),
-                                (self.edit_trim_end, end)):
-                edit.blockSignals(True)
-                edit.setText(format_timecode(value) if value else "")
-                edit.blockSignals(False)
+            self.sidebar.set_trim_fields(start, end)
         elif hasattr(self, "preview"):
             self.preview.apply_trim(start, end)
         for row in self.rows.values():
             row.set_trim(start, end)
-
-    def _set_trim_state(self, values: tuple[float, float] | None) -> None:
-        danger = theme.current()["danger"]
-        muted = theme.current()["muted"]
-        if values is None:
-            for edit in (self.edit_trim_start, self.edit_trim_end):
-                edit.setStyleSheet(f"border-color: {danger};")
-            self.trim_title.setText("Фрагмент · проверьте время")
-            self.trim_title.setStyleSheet(f"color: {danger};")
-            return
-        for edit in (self.edit_trim_start, self.edit_trim_end):
-            edit.setStyleSheet("")
-        start, end = values
-        if not start and not end:
-            self.trim_title.setText("Фрагмент · весь файл")
-        else:
-            tail = f"по {format_timecode(end)}" if end else "до конца"
-            length = f" · {end - start:.1f} с" if end else ""
-            self.trim_title.setText(
-                f"Фрагмент · {format_timecode(start)} {tail}{length}")
-        self.trim_title.setStyleSheet(
-            f"color: {muted}; font-size: 11px; font-weight: 600;")
 
     def _show_view(self, index: int) -> None:
         self.stack.setCurrentIndex(index)
@@ -948,83 +665,6 @@ class MainWindow(QMainWindow):
     def _open_preview_for(self, job_id: str) -> None:
         self._show_view(1)
         self.preview.select_job(job_id)
-
-    def _on_image_scale(self) -> None:
-        data = self.cmb_image_scale.currentData()
-        if data == "custom" and not (self.edit_img_w.text().strip()
-                                     or self.edit_img_h.text().strip()):
-            # стартуем от текущего размера первого изображения, а не с пустых полей
-            for job in self.jobs:
-                info = job.info
-                if info.kind == "image" and info.width and info.height:
-                    self._set_img_field(self.edit_img_w, str(info.width))
-                    self._set_img_field(self.edit_img_h, str(info.height))
-                    self._on_image_size_edited("w")
-                    break
-        if data is None:
-            self._set_opt("image_scale", "none")
-        elif data == "custom":
-            self._set_opt("image_scale", "size")
-        else:
-            self._set_opt("image_scale", "percent")
-            self._set_opt("image_percent", data)
-        self._update_image_widgets()
-
-    def _image_aspect(self) -> float | None:
-        """Пропорции первого изображения в очереди — по ним подгоняем поля."""
-        for job in self.jobs:
-            info = job.info
-            if info.kind == "image" and info.width and info.height:
-                return info.width / info.height
-        return None
-
-    def _set_img_field(self, edit: QLineEdit, value: str) -> None:
-        if edit.text() == value:
-            return
-        edit.blockSignals(True)
-        edit.setText(value)
-        edit.blockSignals(False)
-
-    def _on_ratio_toggled(self, checked: bool) -> None:
-        self._set_opt("image_keep_ratio", checked)
-        if not checked:
-            return
-        if self.edit_img_w.text().strip():
-            self._on_image_size_edited("w")
-        elif self.edit_img_h.text().strip():
-            self._on_image_size_edited("h")
-
-    def _on_image_size_edited(self, which: str = "w") -> None:
-        """Ручной размер в пикселях: при «Сохранять пропорции» вторая сторона
-        пересчитывается сразу, чтобы в интерфейсе был реальный размер."""
-        if self.chk_ratio.isChecked():
-            aspect = self._image_aspect()
-            if aspect:
-                if which == "w":
-                    text = self.edit_img_w.text().strip()
-                    if text.isdigit() and int(text) > 0:
-                        self._set_img_field(
-                            self.edit_img_h, str(max(1, round(int(text) / aspect))))
-                else:
-                    text = self.edit_img_h.text().strip()
-                    if text.isdigit() and int(text) > 0:
-                        self._set_img_field(
-                            self.edit_img_w, str(max(1, round(int(text) * aspect))))
-        self._set_opt("image_width", self.edit_img_w.text().strip())
-        self._set_opt("image_height", self.edit_img_h.text().strip())
-
-    def _update_image_widgets(self) -> None:
-        mode = self.cmb_image_scale.currentData()
-        self.image_size_row.setVisible(mode == "custom")
-        self.chk_ratio.setVisible(mode == "custom")
-
-    def _pick_out_dir(self) -> None:
-        start = self.edit_out.text() or str(Path.home())
-        path = QFileDialog.getExistingDirectory(self, "Папка для результатов", start)
-        if path:
-            self.edit_out.setText(path)
-            self.settings.set("out_dir", path)
-            self.settings.save()
 
     # ================================================================== #
     # Добавление файлов
@@ -1049,14 +689,15 @@ class MainWindow(QMainWindow):
         if self._is_busy() or not self.jobs:
             return
         try:
-            self._read_trim()
+            self.sidebar.read_trim()
         except ValueError as exc:
             self._flash(str(exc))
             QMessageBox.warning(self, APP_NAME, str(exc))
             return
         opts = self.settings.options()
-        use_source = self.chk_source_dir.isChecked()
-        out_dir = Path(self.edit_out.text()) if self.edit_out.text() else Path.home()
+        use_source = self.sidebar.use_source_dir
+        out_text = self.sidebar.out_dir_text()
+        out_dir = Path(out_text) if out_text else Path.home()
         if not use_source:
             try:
                 out_dir.mkdir(parents=True, exist_ok=True)
@@ -1073,9 +714,9 @@ class MainWindow(QMainWindow):
         workers = 1 if opts.gentle else max(1, int(self.settings.get("max_workers", 2)))
         self.engine = Engine(self.tools, opts, self._emit_event, max_workers=workers)
         self.engine.start(list(self.jobs), out_dir)
-        self.btn_convert.setVisible(False)
-        self.btn_cancel.setVisible(True)
-        self.btn_cancel.setEnabled(True)
+        self.sidebar.btn_convert.setVisible(False)
+        self.sidebar.btn_cancel.setVisible(True)
+        self.sidebar.btn_cancel.setEnabled(True)
         self.progress_line.setValue(0.0)
         self._set_status(f"Конвертация: 0 из {len(self.jobs)}", "run")
         self._update_convert_button()
@@ -1086,7 +727,7 @@ class MainWindow(QMainWindow):
     def cancel_conversion(self) -> None:
         if self.engine is not None and self.engine.running:
             self.engine.stop()
-            self.btn_cancel.setEnabled(False)
+            self.sidebar.btn_cancel.setEnabled(False)
             self._set_status("Останавливаю…", "wait")
 
     def _on_engine_event(self, event: str, job: Job) -> None:
@@ -1114,7 +755,7 @@ class MainWindow(QMainWindow):
                     f"Готово: {len(ok)} · с ошибками: {len(errors)}", "error")
             else:
                 self._set_status(f"Готово: {len(ok)} {self._plural(len(ok), 'файл', 'файла', 'файлов')}", "ok")
-            self.btn_convert.setVisible(True)
+            self.sidebar.btn_convert.setVisible(True)
             for row in self.rows.values():
                 row.remove.setEnabled(True)
             self._update_convert_button()
@@ -1148,7 +789,7 @@ class MainWindow(QMainWindow):
                 target = job.output.parent
                 break
         if target is None:
-            target = Path(self.edit_out.text() or Path.home())
+            target = Path(self.sidebar.out_dir_text() or Path.home())
         if not target.exists():
             self._flash("Папка не найдена")
             return
