@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import logging
+import logging.handlers
 import math
 import os
+import platform
 import sys
 import threading
 from dataclasses import asdict, fields
@@ -32,6 +34,64 @@ def config_dir() -> Path:
     else:
         base = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
     return base / APP_NAME
+
+
+LOG_MAX_BYTES = 1024 * 1024      # 1 МБ на файл
+LOG_BACKUPS = 3                 # плюс три архивных копии
+LOG_NAME = "mediaforge.log"
+_NO_FILE_HANDLER = "_mediaforge_file_handler"
+
+
+def log_dir() -> Path:
+    return config_dir() / "logs"
+
+
+def log_path() -> Path:
+    return log_dir() / LOG_NAME
+
+
+def setup_logging(
+    log_file: Path | None = None,
+    debug: bool | None = None,
+    max_bytes: int = LOG_MAX_BYTES,
+    backups: int = LOG_BACKUPS,
+) -> Path | None:
+    """Файловый лог рядом с настройками; без прав на запись просто молчим.
+
+    Возвращает путь к логу или None, если писать некуда: диагностика не должна
+    мешать запуску.
+    """
+    if debug is None:
+        debug = os.environ.get("MEDIAFORGE_DEBUG", "").strip().lower() in {
+            "1", "true", "yes", "on"}
+    level = logging.DEBUG if debug else logging.INFO
+
+    root = logging.getLogger()
+    for handler in list(root.handlers):
+        if getattr(handler, _NO_FILE_HANDLER, False):
+            root.removeHandler(handler)
+            try:
+                handler.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    target = Path(log_file) if log_file is not None else log_path()
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        handler = logging.handlers.RotatingFileHandler(
+            target, maxBytes=max_bytes, backupCount=backups, encoding="utf-8")
+    except OSError:
+        return None
+
+    setattr(handler, _NO_FILE_HANDLER, True)
+    handler.setFormatter(logging.Formatter(
+        "%(asctime)s %(levelname)-7s %(name)s: %(message)s"))
+    root.addHandler(handler)
+    root.setLevel(level)
+    log.info("%s %s · python %s · %s", APP_NAME, APP_VERSION,
+             platform.python_version(), sys.platform)
+    log.info("лог: %s (уровень %s)", target, logging.getLevelName(level))
+    return target
 
 
 def config_path() -> Path:

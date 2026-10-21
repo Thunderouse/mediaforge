@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 import tempfile
@@ -13,7 +14,7 @@ from PySide6.QtGui import QFont, QFontDatabase, QGuiApplication
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from .core import preview as preview_cache
-from .core.config import APP_NAME, APP_VERSION, Settings
+from .core.config import APP_NAME, APP_VERSION, Settings, setup_logging
 from .core.ffmpeg import FFmpegNotFound, Tools
 from .ui import theme
 from .ui.main_window import MainWindow, app_icon
@@ -31,6 +32,7 @@ def _pick_font() -> QFont:
 def _install_excepthook(app: QApplication) -> None:
     def hook(exc_type, exc, tb):
         text = "".join(traceback.format_exception(exc_type, exc, tb))
+        logging.getLogger(__name__).error("необработанное исключение:\n%s", text)
         # под pythonw.exe stderr отсутствует
         try:
             if sys.stderr is not None:
@@ -52,6 +54,9 @@ def _install_excepthook(app: QApplication) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    log_file = setup_logging()          # раньше всего: даже падение старта попадёт в лог
+    log = logging.getLogger(__name__)
+    log.info("старт, лог: %s", log_file or "недоступен")
     if os.name == "nt":
         try:  # корректная иконка/группировка в панели задач Windows
             import ctypes
@@ -90,6 +95,7 @@ def main(argv: list[str] | None = None) -> int:
         tools = None
         error = str(exc)
 
+    log.info("ffmpeg: %s", tools.ffmpeg if tools else f"не найден ({error})")
     _install_excepthook(app)
     window = MainWindow(settings, tools, error)
     if icon is not None and not icon.isNull():

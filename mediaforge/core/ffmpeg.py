@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -15,6 +16,8 @@ from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import IO, Callable, Iterable, Sequence
+
+log = logging.getLogger(__name__)
 
 IS_WINDOWS = os.name == "nt"
 EXE = ".exe" if IS_WINDOWS else ""
@@ -444,6 +447,8 @@ def run_ffmpeg(
     строки вида `out_time_us=1234567` и `speed=1.42x`. stderr читается
     отдельным потоком — иначе большой поток ошибок блокирует ffmpeg.
     """
+    # полная команда — только на DEBUG: в ней есть пути пользователя
+    log.debug("ffmpeg %s", " ".join(str(part) for part in cmd))
     flags = _popen_flags()
     proc = subprocess.Popen(
         list(cmd),
@@ -504,7 +509,12 @@ def run_ffmpeg(
         if cancel is not None and cancel.is_set():
             raise Cancelled()
         err = "\n".join(tail)
+        log.error("ffmpeg завершился с кодом %s: %s", proc.returncode,
+                  _short_error(err) or "без текста ошибки")
+        if tail:
+            log.debug("хвост stderr:\n%s", "\n".join(list(tail)[-20:]))
         raise ConvertError(_short_error(err) or f"ffmpeg завершился с кодом {proc.returncode}")
+    log.debug("ffmpeg готов, код %s", proc.returncode)
     if on_progress:
         on_progress(1.0, speed)
 

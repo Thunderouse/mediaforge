@@ -23,7 +23,8 @@ from mediaforge.core import engine as engine_mod
 from mediaforge.core import formats as fm
 from mediaforge.core import preview as pv
 from mediaforge.core import updates
-from mediaforge.core.config import Settings, config_path
+from mediaforge.core import config as cfg
+from mediaforge.core.config import APP_VERSION, Settings, config_path
 from mediaforge.core.convert import (
     Cancelled,
     ConversionResult,
@@ -1689,3 +1690,66 @@ def test_gif_palette_removed_on_both_paths(tmp_path, tools, media, monkeypatch):
     assert made and not any(p.exists() for p in made)
     # отмена не должна оставить ни нового GIF, ни «.part»
     assert sorted(p.name for p in out.iterdir()) == before, [p.name for p in out.iterdir()]
+
+
+# --------------------------------------------------------------------------- #
+# Портативный лог
+# --------------------------------------------------------------------------- #
+def _read_log(path: Path) -> str:
+    return path.read_text(encoding="utf-8", errors="replace")
+
+
+def test_log_written_next_to_settings(tmp_path, monkeypatch):
+    monkeypatch.setenv("MEDIAFORGE_CONFIG_DIR", str(tmp_path))
+    target = cfg.setup_logging(debug=True)
+    try:
+        assert target == tmp_path / "logs" / "mediaforge.log"
+        cfg.log.warning("проверка записи в лог")
+        text = _read_log(target)
+        assert "проверка записи в лог" in text
+        assert APP_VERSION in text, "версия не попала в лог"
+    finally:
+        cfg.setup_logging(log_file=tmp_path / "logs" / "fallback.log")
+
+
+@needs_ffmpeg
+def test_log_has_command_and_return_code(tmp_path, monkeypatch):
+    """Неудачный вызов ffmpeg оставляет в логе команду, код и хвост stderr."""
+    monkeypatch.setenv("MEDIAFORGE_CONFIG_DIR", str(tmp_path))
+    target = cfg.setup_logging(debug=True)
+    assert target is not None
+
+    missing = tmp_path / "нет-такого.mp4"
+    cmd = [FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-i", str(missing),
+           str(tmp_path / "out.mp4")]
+    with pytest.raises(ConvertError):
+        run_ffmpeg(cmd)
+
+    text = _read_log(target)
+    assert "-i" in text and "нет-такого.mp4" in text, "команды ffmpeg в логе нет"
+    assert "завершился с кодом 1" in text or "завершился с кодом" in text
+    assert "выйти" in text.lower() or "error" in text.lower() or "No such file" in text
+
+
+def test_log_rotates_and_keeps_three_backups(tmp_path):
+    target = tmp_path / "logs" / "mediaforge.log"
+    cfg.setup_logging(log_file=target, debug=True, max_bytes=2000, backups=3)
+    try:
+        for i in range(200):
+            cfg.log.info("строка %03d %s", i, "x" * 80)
+        files = sorted(p.name for p in target.parent.glob("mediaforge.log*"))
+        backups = [name for name in files if name != "mediaforge.log"]
+        assert len(backups) <= 3, files
+        assert backups, "ротация не сработала"
+        assert target.stat().st_size <= 2000 + 200
+    finally:
+        cfg.setup_logging(log_file=tmp_path / "unused.log")
+
+
+def test_unwritable_log_dir_does_not_crash(tmp_path):
+    blocker = tmp_path / "blocked"
+    blocker.write_text("это файл, а не каталог", encoding="utf-8")
+    assert cfg.setup_logging(log_file=blocker / "logs" / "mediaforge.log") is None
+
+    # и приложение после этого пишет настройки как обычно
+    cfg.log.warning("сообщение без файла")
