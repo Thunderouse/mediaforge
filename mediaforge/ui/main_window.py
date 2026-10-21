@@ -521,6 +521,10 @@ class MainWindow(QMainWindow):
         if job is not None and job.status == STATUS_RUNNING:
             self._flash("Файл конвертируется — сначала остановите")
             return
+        if job is not None and self._is_busy():
+            # задача ещё в очереди — движок получил снимок списка при старте,
+            # поэтому просим его пропустить именно эту задачу
+            job.cancel.set()
         row = self.rows.pop(job_id, None)
         if row is not None:
             self.list_lay.removeWidget(row)

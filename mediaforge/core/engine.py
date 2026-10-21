@@ -34,6 +34,8 @@ class Job:
     message: str = ""
     output: Path | None = None
     elapsed: float = 0.0
+    # свой флаг: задача может быть снята с очереди, пока движок занят другими
+    cancel: threading.Event = field(default_factory=threading.Event, repr=False)
 
     @property
     def name(self) -> str:
@@ -45,6 +47,22 @@ class Job:
 
 
 EventCB = Callable[[str, Job], None]
+
+
+class _AnyCancel:
+    """Событие-адаптер: «отменено», если взведён общий стоп или флаг задачи.
+
+    convert_file/run_ffmpeg дёргают только `is_set()`, поэтому отдельный класс
+    не нужен — достаточно того же интерфейса.
+    """
+
+    __slots__ = ("_events",)
+
+    def __init__(self, *events: threading.Event) -> None:
+        self._events = events
+
+    def is_set(self) -> bool:
+        return any(event.is_set() for event in self._events)
 
 
 class Engine:
@@ -98,6 +116,7 @@ class Engine:
             job.progress = 0.0
             job.message = ""
             job.speed = ""
+            job.cancel.clear()
             self._pool.submit(self._run_one, job, default_out_dir)
         self._pool.shutdown(wait=False)
 
@@ -108,7 +127,9 @@ class Engine:
         # и движок навсегда останется в состоянии running.
         with self._lock:
             self._running += 1
-            cancelled_before_start = self._cancel.is_set()
+            # отмена может прийти и общей командой «стоп», и снятием этой
+            # задачи с очереди — второй случай помечает сам Job
+            cancelled_before_start = self._cancel.is_set() or job.cancel.is_set()
         started = time.monotonic()
 
         def progress(p: float, speed: str) -> None:
@@ -135,7 +156,8 @@ class Engine:
 
             result = convert_file(
                 job.src, job.target, self.options, self.tools, out_dir,
-                info=job.info, on_progress=progress, cancel=self._cancel,
+                info=job.info, on_progress=progress,
+                cancel=_AnyCancel(self._cancel, job.cancel),
             )
             job.output = result.output
             job.message = result.note

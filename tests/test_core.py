@@ -986,3 +986,68 @@ def test_image_ffmpeg_fallback_respects_cancel(media, tools, tmp_path, monkeypat
                      tools=tools, out_dir=out, cancel=cancel)
 
     assert list(out.iterdir()) == []
+
+
+# --------------------------------------------------------------------------- #
+# Снятая с очереди задача не должна конвертироваться
+# --------------------------------------------------------------------------- #
+def test_removed_pending_job_is_skipped(monkeypatch, tmp_path):
+    """3 задачи, 1 поток: вторая снята до старта — convert_file вызван 2 раза."""
+    events: list[str] = []
+    calls: list[str] = []
+    lock = threading.Lock()
+    first_started = threading.Event()
+    release = threading.Event()
+
+    def fake_convert(src, target, opts, tools, out_dir, info=None,
+                     on_progress=None, cancel=None):
+        with lock:
+            calls.append(src.name)
+            number = len(calls)
+        if number == 1:
+            first_started.set()
+            release.wait(5.0)
+        assert cancel is None or not cancel.is_set() or number > 1
+        return ConversionResult(output=Path(out_dir) / f"{src.stem}.{target.ext}")
+
+    monkeypatch.setattr(engine_mod, "convert_file", fake_convert)
+    jobs = _fake_jobs(3, tmp_path)
+    engine = Engine(tools=object(), options=fm.ConvertOptions(),
+                    on_event=lambda event, job: events.append(event), max_workers=1)
+
+    engine.start(jobs, tmp_path)
+    assert first_started.wait(5.0), "первая задача не стартовала"
+    jobs[1].cancel.set()          # пользователь удалил строку из очереди
+    release.set()
+
+    assert _wait_for(lambda: events.count("finished") == 1), "finished не пришёл"
+    assert calls == ["clip0.mp4", "clip2.mp4"], calls
+    assert jobs[0].status == STATUS_DONE
+    assert jobs[1].status == STATUS_CANCELLED
+    assert jobs[2].status == STATUS_DONE
+    assert jobs[1].output is None
+    assert events.count("finished") == 1
+    assert engine._remaining == 0 and engine._done_count == 3
+    assert engine.running is False
+
+
+def test_job_cancel_flag_is_reset_on_restart(monkeypatch, tmp_path):
+    """Повторный запуск сбрасывает флаг отмены, иначе задача «залипнет» снятой."""
+    calls: list[str] = []
+
+    def fake_convert(src, target, opts, tools, out_dir, info=None,
+                     on_progress=None, cancel=None):
+        calls.append(src.name)
+        return ConversionResult(output=Path(out_dir) / f"{src.stem}.{target.ext}")
+
+    monkeypatch.setattr(engine_mod, "convert_file", fake_convert)
+    jobs = _fake_jobs(1, tmp_path)
+    jobs[0].cancel.set()
+
+    engine = Engine(tools=object(), options=fm.ConvertOptions(),
+                    on_event=lambda event, job: None, max_workers=1)
+    engine.start(jobs, tmp_path)
+    assert _wait_for(lambda: not engine.running, 5.0)
+
+    assert calls == ["clip0.mp4"], "флаг отмены пережил перезапуск"
+    assert jobs[0].status == STATUS_DONE
