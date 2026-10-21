@@ -445,7 +445,12 @@ class JobRow(QFrame):
             parts = [f"{pct}%{speed}"] + parts
             self.meta.setStyleSheet(f"color: {p['accent']}; font-size: 11px;")
         else:
-            self.meta.setStyleSheet(f"color: {p['dim']}; font-size: 11px;")
+            tone = p["warn"] if info.probe_failed else p["dim"]
+            self.meta.setStyleSheet(f"color: {tone}; font-size: 11px;")
+        if info.probe_failed:
+            # ffprobe не осилил файл: честно говорим об этом, а не показываем нули
+            # (подсказку ставит ElidedLabel — полный текст подписи)
+            parts.append("⚠ метаданные не прочитаны")
         start, end = self._trim
         if (start or end) and self.job.info.kind in ("video", "audio"):
             tail = format_timecode(end) if end else "конец"

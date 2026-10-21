@@ -1366,3 +1366,75 @@ def test_cache_size_ignores_directories(tmp_path, monkeypatch):
     _touch(tmp_path / "a.png", 500, age_seconds=10)
     (tmp_path / "sub").mkdir()
     assert pv.cache_size() == 500
+
+
+# --------------------------------------------------------------------------- #
+# Неудачная проба: флаг, тип и анимированный GIF
+# --------------------------------------------------------------------------- #
+def _animated_gif(path: Path, frames: int = 3, size: int = 40) -> bool:
+    try:
+        from PIL import Image
+    except ImportError:
+        return False
+    images = [Image.new("RGB", (size, size), (40 * i % 255, 90, 160)) for i in range(frames)]
+    images[0].save(path, save_all=True, append_images=images[1:], duration=120, loop=0)
+    return True
+
+
+@needs_ffmpeg
+def test_probe_failed_flag_for_broken_file(tools, tmp_path):
+    """Битый файл: probe_failed=True, тип — по расширению."""
+    broken = tmp_path / "broken.webm"
+    broken.write_bytes(b"\x00" * 512)
+
+    info = probe(broken, tools)
+
+    assert info.probe_failed is True
+    assert info.kind == "video"          # догадка по расширению
+    assert info.duration == 0.0
+
+    good = probe(Path(FFMPEG).with_name("ffmpeg"), tools)  # заведомо не медиа, но файл есть
+    assert good.probe_failed is True
+
+
+@needs_ffmpeg
+def test_probe_ok_has_no_flag(media, tools):
+    info = probe(media["clip"], tools)
+    assert info.probe_failed is False
+    assert info.kind == "video"
+    assert info.duration > 0
+
+
+@needs_ffmpeg
+def test_animated_gif_without_ffprobe_goes_to_video_branch(tools, tmp_path):
+    """ffprobe недоступен, но GIF анимированный — значит не Pillow-ветка."""
+    gif = tmp_path / "anim.gif"
+    if not _animated_gif(gif):
+        pytest.skip("нет Pillow")
+
+    blind = Tools(ffmpeg=tools.ffmpeg, ffprobe=str(tmp_path / "нет-ffprobe"))
+    info = probe(gif, blind)
+
+    assert info.probe_failed is True
+    assert info.kind == "video", "анимированный GIF попал в ветку картинки"
+
+    out = tmp_path / "out"
+    out.mkdir()
+    result = convert_file(gif, fm.BY_KEY["gif"], fm.ConvertOptions(), tools, out)
+
+    from PIL import Image
+    with Image.open(result.output) as im:
+        assert getattr(im, "n_frames", 1) > 1, "анимация потеряна"
+
+
+def test_static_gif_without_ffprobe_stays_image(tools, tmp_path):
+    """Статичный GIF при неудачной пробе остаётся картинкой."""
+    gif = tmp_path / "static.gif"
+    if not _animated_gif(gif, frames=1):
+        pytest.skip("нет Pillow")
+
+    blind = Tools(ffmpeg=tools.ffmpeg, ffprobe=str(tmp_path / "нет-ffprobe"))
+    info = probe(gif, blind)
+
+    assert info.probe_failed is True
+    assert info.kind == "image"

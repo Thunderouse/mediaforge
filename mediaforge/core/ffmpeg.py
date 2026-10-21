@@ -203,6 +203,7 @@ class MediaInfo:
     has_audio: bool = False
     size: int = 0
     bitrate: int = 0
+    probe_failed: bool = False   # ffprobe не смог прочитать файл
 
     @property
     def size_label(self) -> str:
@@ -252,6 +253,32 @@ def guess_kind(path: Path) -> str:
     return "unknown"
 
 
+def _gif_is_animated(path: Path) -> bool:
+    """Анимированный ли GIF — по числу кадров Pillow (её импорт не обязателен)."""
+    try:
+        from PIL import Image
+    except ImportError:
+        return False
+    try:
+        with Image.open(path) as im:
+            return int(getattr(im, "n_frames", 1)) > 1
+    except Exception:  # noqa: BLE001 — битый gif просто не анимированный
+        return False
+
+
+def _probe_failed(info: MediaInfo) -> MediaInfo:
+    """Файл не прочитался: помечаем и уточняем тип по содержимому.
+
+    Для GIF одной догадки по расширению мало: анимированный GIF, отданный в
+    Pillow-ветку, молча превратился бы в один статичный кадр. Поэтому кадры
+    считаем через Pillow и такой файл считаем видео — дальше работает ffmpeg.
+    """
+    info.probe_failed = True
+    if info.path.suffix.lower() == ".gif" and _gif_is_animated(info.path):
+        info.kind = "video"
+    return info
+
+
 def probe(path: Path, tools: Tools) -> MediaInfo:
     """Читает метаданные через ffprobe; при ошибке возвращает догадку по расширению."""
     info = MediaInfo(path=Path(path), kind=guess_kind(Path(path)))
@@ -271,8 +298,10 @@ def probe(path: Path, tools: Tools) -> MediaInfo:
             **_popen_flags(),
         )
         data = json.loads(raw.stdout or "{}")
+        if raw.returncode != 0 or not (data.get("streams") or data.get("format")):
+            return _probe_failed(info)
     except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
-        return info
+        return _probe_failed(info)
 
     streams = data.get("streams", []) or []
     fmt = data.get("format", {}) or {}
