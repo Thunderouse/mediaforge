@@ -19,6 +19,18 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: версия в коде совпадает с тегом
+        run: |
+          version=$(python3 tools/version.py)
+          echo "версия в коде: $version · тег: $GITHUB_REF_NAME"
+          test "$version" = "${GITHUB_REF_NAME#v}"
+
+      - name: тесты ядра
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest
+          python -m pytest -q tests/test_core.py
+
       - name: инструменты сборки
         run: |
           python -m pip install --upgrade pip
@@ -123,7 +135,7 @@ jobs:
             gh release upload "$GITHUB_REF_NAME" dist/* -R "$REPO" --clobber
           else
             gh release create "$GITHUB_REF_NAME" dist/* -R "$REPO" \
-              --title "MediaForge $GITHUB_REF_NAME" --generate-notes
+              --title "MediaForge ${GITHUB_REF_NAME#v}" --generate-notes
           fi
           gh release view "$GITHUB_REF_NAME" -R "$REPO" --json assets \
             --jq '.assets[] | "\(.name) \(.size)"'
