@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 import sys
@@ -21,6 +22,7 @@ from mediaforge.core import engine as engine_mod
 from mediaforge.core import formats as fm
 from mediaforge.core import preview as pv
 from mediaforge.core import updates
+from mediaforge.core.config import Settings
 from mediaforge.core.convert import (
     Cancelled,
     ConversionResult,
@@ -1179,3 +1181,108 @@ def test_overwrite_error_removes_part_and_keeps_file(media, tools, tmp_path):
 
     assert existing.read_bytes() == b"real data"
     assert sorted(p.name for p in out.iterdir()) == ["a.mp3"], [p.name for p in out.iterdir()]
+
+
+# --------------------------------------------------------------------------- #
+# Валидация настроек (мусор в settings.json не должен доезжать до конвертации)
+# --------------------------------------------------------------------------- #
+def test_invalid_quality_falls_back_to_default():
+    settings = Settings({"opt_quality": "ultra"})
+    assert settings.options().quality == "balanced"
+    assert "ultra" not in fm.QUALITY_VALUES
+
+
+def test_invalid_image_percent_and_resolution_are_clean():
+    settings = Settings({
+        "opt_image_scale": "percent",
+        "opt_image_percent": "37",
+        "opt_resolution": 9999,
+        "opt_gif_fps": 7,
+        "opt_audio_bitrate": "999k",
+        "opt_image_filter": "magic",
+    })
+    opts = settings.options()
+    assert opts.image_scale == "percent"
+    assert opts.image_percent in fm.IMAGE_PERCENTS
+    assert opts.resolution in fm.RESOLUTION_VALUES
+    assert opts.gif_fps in fm.GIF_FPS
+    assert opts.audio_bitrate in fm.AUDIO_BITRATES
+    assert opts.image_filter in fm.IMAGE_FILTER_VALUES
+    # и конвертация с такими опциями не падает на расчёте размера
+    assert target_image_size((1280, 800), opts) == (1920, 1200)
+
+
+def test_max_workers_junk_does_not_raise():
+    settings = Settings({"max_workers": "abc"})
+    assert settings.get_int("max_workers", 2) == 2
+    assert settings.get("max_workers") == 2
+    assert int(settings.get("max_workers", 2)) == 2      # как делает UI
+    settings.set("max_workers", 7)
+    assert settings.get_int("max_workers", 2) == 7       # нормальное число читается
+    settings.set("max_workers", None)
+    assert settings.get_int("max_workers", 2) == 2       # и None тоже не роняет
+
+
+def test_valid_config_reads_unchanged(tmp_path, monkeypatch):
+    valid = {
+        "theme": "dark", "out_dir": str(tmp_path), "use_source_dir": False,
+        "recursive": True, "max_workers": 3, "window_geometry": "abc",
+        "opt_quality": "high", "opt_resolution": "1080", "opt_gif_fps": "20",
+        "opt_gif_loop": False, "opt_audio_bitrate": "320k",
+        "opt_keep_metadata": False, "opt_gpu": True, "opt_gentle": False,
+        "opt_overwrite": True, "opt_trim_start": 1.5, "opt_trim_end": 9.0,
+        "opt_image_scale": "size", "opt_image_percent": "200",
+        "opt_image_width": "640", "opt_image_height": "480",
+        "opt_image_keep_ratio": False, "opt_image_allow_upscale": True,
+        "opt_image_filter": "nearest",
+    }
+    settings = Settings(valid)
+    assert settings.sanitize() == [], "валидный конфиг не должен правиться"
+    assert settings._data == valid
+    opts = settings.options()
+    assert (opts.quality, opts.resolution, opts.image_percent) == ("high", "1080", "200")
+    assert (opts.image_width, opts.image_height, opts.image_filter) == ("640", "480", "nearest")
+    assert opts.trim_start == 1.5 and opts.trim_end == 9.0
+
+
+def test_load_repairs_broken_settings_file(tmp_path, monkeypatch):
+    """Испорченный settings.json: load() не падает и отдаёт допустимые опции."""
+    monkeypatch.setenv("MEDIAFORGE_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "settings.json").write_text(json.dumps({
+        "opt_quality": "ultra",
+        "opt_resolution": 9999,
+        "opt_image_scale": "percent",
+        "opt_image_percent": "37",
+        "opt_trim_start": "пять",
+        "opt_image_width": "abc",
+        "max_workers": "abc",
+        "theme": "neon",
+        "unknown_key": {"x": 1},
+    }, ensure_ascii=False), encoding="utf-8")
+
+    settings = Settings.load()
+    opts = settings.options()
+    assert opts.quality == "balanced"
+    assert opts.resolution == "original"
+    assert opts.image_percent in fm.IMAGE_PERCENTS
+    assert opts.trim_start == 0.0
+    assert opts.image_width == ""
+    assert settings.get_int("max_workers", 2) == 2
+    assert settings.get("theme") == "system"
+    # посторонний ключ не потерян и не мешает
+    assert settings.get("unknown_key") == {"x": 1}
+
+    settings.save()                       # файл остаётся читаемым
+    again = Settings.load()
+    assert again.options() == opts
+
+
+def test_options_stay_valid_after_direct_set():
+    settings = Settings()
+    settings.set("opt_quality", "ultra")
+    settings.set("opt_image_percent", "37")
+    settings.set("opt_trim_end", "конец")
+    opts = settings.options()
+    assert opts.quality in fm.QUALITY_VALUES
+    assert opts.image_percent in fm.IMAGE_PERCENTS
+    assert opts.trim_end == 0.0

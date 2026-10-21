@@ -112,6 +112,12 @@ IMAGE_FILTERS = (
     ("nearest", "Ближайший · пиксель-арт"),
 )
 
+# то, что реально принимают команды и UI (для валидации настроек)
+QUALITY_VALUES = tuple(key for key, _ in QUALITY_LABELS)
+RESOLUTION_VALUES = tuple(key for key, _ in RESOLUTIONS)
+IMAGE_SCALE_VALUES = tuple(key for key, _ in IMAGE_SCALES)
+IMAGE_FILTER_VALUES = tuple(key for key, _ in IMAGE_FILTERS)
+
 
 @dataclass
 class ConvertOptions:

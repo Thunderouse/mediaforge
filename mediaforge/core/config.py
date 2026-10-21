@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import json
+import logging
+import math
 import os
 import sys
 from dataclasses import asdict, fields
 from pathlib import Path
 
+from . import formats as fm
 from .formats import ConvertOptions
+
+log = logging.getLogger(__name__)
 
 APP_NAME = "MediaForge"
 APP_VERSION = "1.3.1"
@@ -32,6 +37,117 @@ def config_path() -> Path:
     return config_dir() / "settings.json"
 
 
+THEMES = ("system", "light", "dark")
+
+_TRUE = {"1", "true", "yes", "on", "да"}
+_FALSE = {"0", "false", "no", "off", "", "нет"}
+
+_MAX_EDGE = 100_000
+
+
+def _as_bool(value, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in _TRUE:
+            return True
+        if text in _FALSE:
+            return False
+    return default
+
+
+def _as_choice(value, allowed: tuple[str, ...], default: str) -> str:
+    if isinstance(value, str) and value in allowed:
+        return value
+    if isinstance(value, (int, float)) and str(value) in allowed:
+        return str(value)
+    return default
+
+
+def _as_seconds(value, default: float = 0.0) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    if not math.isfinite(number) or number < 0:
+        return default
+    return number
+
+
+def _as_size(value) -> str:
+    """Ширина/высота в px: пустая строка или число в разумных пределах."""
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if not text:
+        return ""
+    if not text.isdigit():
+        return ""
+    number = int(text)
+    if not 1 <= number <= _MAX_EDGE:
+        return ""
+    return str(number)
+
+
+def _as_int(value, default: int, low: int, high: int) -> int:
+    if isinstance(value, bool):
+        return default
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return default
+    return number if low <= number <= high else default
+
+
+def _as_text(value, default: str = "") -> str:
+    return value if isinstance(value, str) else default
+
+
+_OPTION_RULES = {
+    "quality": lambda v: _as_choice(v, fm.QUALITY_VALUES, "balanced"),
+    "resolution": lambda v: _as_choice(v, fm.RESOLUTION_VALUES, "original"),
+    "gif_fps": lambda v: _as_choice(v, fm.GIF_FPS, "15"),
+    "audio_bitrate": lambda v: _as_choice(v, fm.AUDIO_BITRATES, "192k"),
+    "image_scale": lambda v: _as_choice(v, fm.IMAGE_SCALE_VALUES, "none"),
+    "image_percent": lambda v: _as_choice(v, fm.IMAGE_PERCENTS, "150"),
+    "image_filter": lambda v: _as_choice(v, fm.IMAGE_FILTER_VALUES, "lanczos"),
+    "image_width": _as_size,
+    "image_height": _as_size,
+    "trim_start": _as_seconds,
+    "trim_end": _as_seconds,
+}
+
+
+def clean_option(name: str, value, default):
+    """Приводит значение опции к допустимому виду; мусор → default."""
+    rule = _OPTION_RULES.get(name)
+    if rule is not None:
+        return rule(value)
+    if isinstance(default, bool):
+        return _as_bool(value, default)
+    if isinstance(default, float):
+        return _as_seconds(value, default)
+    if isinstance(default, str):
+        return value if isinstance(value, str) else default
+    return value
+
+
+def clean_setting(name: str, value, default):
+    """То же для служебных ключей (тема, потоки, папки)."""
+    if name == "theme":
+        return _as_choice(value, THEMES, "system")
+    if name == "max_workers":
+        return _as_int(value, 2, 1, 32)
+    if name in ("use_source_dir", "recursive"):
+        return _as_bool(value, bool(default))
+    if name in ("out_dir", "window_geometry"):
+        return _as_text(value, "")
+    return value
+
+
 DEFAULTS = {
     "theme": "system",          # system | light | dark
     "out_dir": "",
@@ -47,6 +163,7 @@ class Settings:
     def __init__(self, data: dict | None = None):
         self._data = dict(DEFAULTS)
         self._data.update(data or {})
+        self.sanitize(log_problems=True)
 
     # ------------------------------------------------------------------ #
     @classmethod
@@ -69,8 +186,45 @@ class Settings:
             pass
 
     # ------------------------------------------------------------------ #
+    def sanitize(self, log_problems: bool = False) -> list[str]:
+        """Чинит значения из settings.json: мусор заменяется дефолтом.
+
+        Молча подставлять нельзя — старый файл с `quality: ultra` иначе
+        доезжает до ffmpeg и падает с KeyError уже во время конвертации.
+        """
+        fixed: list[str] = []
+        for key, default in DEFAULTS.items():
+            raw = self._data.get(key, default)
+            if key.startswith("opt_"):
+                name = key[4:]
+                field_default = next(
+                    (f.default for f in fields(ConvertOptions) if f.name == name), default)
+                clean = clean_option(name, raw, field_default)
+            else:
+                clean = clean_setting(key, raw, default)
+            self._data[key] = clean          # тип тоже нормализуем молча
+            if clean != raw:
+                fixed.append(f"{key}={raw!r} → {clean!r}")
+        if log_problems:
+            for problem in fixed:
+                log.warning("настройка вне допустимых значений: %s", problem)
+        return fixed
+
     def get(self, key: str, default=None):
         return self._data.get(key, DEFAULTS.get(key, default))
+
+    def get_int(self, key: str, default: int = 0) -> int:
+        """Терпимое чтение числа: мусор возвращает default, не исключение."""
+        value = self.get(key, default)
+        if isinstance(value, bool):
+            return default
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            try:
+                return int(float(value))
+            except (TypeError, ValueError):
+                return default
 
     def set(self, key: str, value) -> None:
         self._data[key] = value
@@ -81,7 +235,7 @@ class Settings:
             val = self._data.get(f"opt_{f.name}", f.default)
             if val is None:
                 continue
-            kw[f.name] = val
+            kw[f.name] = clean_option(f.name, val, f.default)
         return ConvertOptions(**kw)
 
     def store_options(self, opts: ConvertOptions) -> None:
