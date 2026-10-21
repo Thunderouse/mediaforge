@@ -828,3 +828,59 @@ def test_failed_conversion_leaves_no_placeholder(media, tools, tmp_path):
     with pytest.raises(ConvertError):
         convert_file(media["silent"], fm.BY_KEY["mp3"], fm.ConvertOptions(), tools, out)
     assert list(out.iterdir()) == [], [p.name for p in out.iterdir()]
+
+
+# --------------------------------------------------------------------------- #
+# overwrite=True: ошибка не должна тронуть существующий файл
+# --------------------------------------------------------------------------- #
+@needs_ffmpeg
+def test_overwrite_failure_keeps_existing_file(media, tools, tmp_path):
+    """Ошибка до запуска ffmpeg: файл назначения остаётся нетронутым."""
+    out = tmp_path / "out"
+    out.mkdir()
+    src = tmp_path / "a.mp4"
+    shutil.copyfile(media["silent"], src)
+    existing = out / "a.mp3"
+    existing.write_bytes(b"original data")
+
+    with pytest.raises(ConvertError):
+        convert_file(src, fm.BY_KEY["mp3"], fm.ConvertOptions(overwrite=True), tools, out)
+
+    assert existing.exists(), "существующий файл удалён"
+    assert existing.read_bytes() == b"original data"
+    assert [p.name for p in out.iterdir()] == ["a.mp3"], "остались временные файлы"
+
+
+@needs_ffmpeg
+def test_overwrite_success_replaces_existing_file(media, tools, tmp_path):
+    """Успешная конвертация с overwrite=True заменяет файл и не оставляет мусора."""
+    out = tmp_path / "out"
+    out.mkdir()
+    existing = out / "clip.mkv"
+    existing.write_bytes(b"old junk")
+
+    result = convert_file(media["clip"], fm.BY_KEY["mkv"],
+                          fm.ConvertOptions(overwrite=True), tools, out)
+
+    assert result.output == existing
+    assert existing.stat().st_size > 1000, "файл не заменён"
+    assert probe(existing, tools).kind == "video"
+    assert [p.name for p in out.iterdir()] == ["clip.mkv"]
+
+
+@needs_ffmpeg
+def test_overwrite_cancel_keeps_existing_file(media, tools, tmp_path):
+    """Отмена на уже запущенном ffmpeg тоже не портит существующий файл."""
+    out = tmp_path / "out"
+    out.mkdir()
+    existing = out / "clip.gif"
+    existing.write_bytes(b"old gif")
+    cancel = threading.Event()
+    cancel.set()
+
+    with pytest.raises(Cancelled):
+        convert_file(media["clip"], fm.BY_KEY["gif"], fm.ConvertOptions(overwrite=True),
+                     tools, out, cancel=cancel)
+
+    assert existing.read_bytes() == b"old gif"
+    assert [p.name for p in out.iterdir()] == ["clip.gif"]

@@ -479,44 +479,68 @@ def convert_file(
     if overwrite and (out_dir / f"{src.stem}.{ext}").resolve() == src.resolve():
         overwrite = False
     dst = unique_path(out_dir, src.stem, ext, overwrite)
+    # Пишем во временный файл рядом и подменяем результат в конце: ошибка не
+    # уничтожает уже существующий файл, а успешная перезапись атомарна.
+    # Расширение сохраняем — ffmpeg выбирает муксер по нему.
+    tmp = _temp_target(out_dir, ext)
 
     try:
         if is_image_path:
             if on_progress:
                 on_progress(0.05, "")
             try:
-                _convert_image_pillow(src, dst, target, opts)
+                _convert_image_pillow(src, tmp, target, opts)
             except ImportError:
                 if tools is None:
                     raise ConvertError("Для этого формата нужен ffmpeg или Pillow")
-                _convert_image_ffmpeg(src, dst, target, opts, tools, info)
+                _convert_image_ffmpeg(src, tmp, target, opts, tools, info)
             if on_progress:
                 on_progress(1.0, "")
         elif target.key == "gif":
             if tools is None:
                 raise ConvertError("Для видео нужен ffmpeg")
-            cmd = build_gif_cmd(src, dst, info, opts, tools)
+            cmd = build_gif_cmd(src, tmp, info, opts, tools)
             run_ffmpeg(cmd, effective_duration, on_progress, cancel)
         elif target.kind == fm.KIND_AUDIO:
             if tools is None:
                 raise ConvertError("Для извлечения звука нужен ffmpeg")
-            cmd = build_audio_cmd(src, dst, info, target, opts, tools)
+            cmd = build_audio_cmd(src, tmp, info, target, opts, tools)
             run_ffmpeg(cmd, effective_duration, on_progress, cancel)
         else:
             if info.kind == "audio":
                 raise ConvertError("Это аудиофайл — выберите аудиоформат")
             if tools is None:
                 raise ConvertError("Для конвертации видео нужен ffmpeg")
-            cmd, note = build_video_cmd(src, dst, info, target, opts, tools)
+            cmd, note = build_video_cmd(src, tmp, info, target, opts, tools)
             run_ffmpeg(cmd, effective_duration, on_progress, cancel)
+
+        if not tmp.exists() or tmp.stat().st_size == 0:
+            raise ConvertError("ffmpeg не создал выходной файл")
+        os.replace(tmp, dst)          # атомарная подмена результата
     except BaseException:
-        _cleanup(dst)
+        _cleanup(tmp)
+        if not overwrite:
+            # при overwrite=False dst — наша же пустая заглушка; чужой файл
+            # (overwrite=True) не трогаем ни при каких ошибках
+            _cleanup(dst)
         raise
 
-    if not dst.exists() or dst.stat().st_size == 0:
-        _cleanup(dst)
-        raise ConvertError("ffmpeg не создал выходной файл")
     return ConversionResult(output=dst, note=note)
+
+
+def _temp_target(directory: Path, ext: str) -> Path:
+    """Уникальный скрытый файл рядом с результатом, с тем же расширением."""
+    while True:
+        path = directory / f".mediaforge-{os.urandom(6).hex()}.{ext}"
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666)
+        except FileExistsError:
+            continue
+        except OSError:
+            # ФС не умеет O_EXCL — имя и так почти наверняка свободно
+            return path
+        os.close(fd)
+        return path
 
 
 def _cleanup(path: Path) -> None:
