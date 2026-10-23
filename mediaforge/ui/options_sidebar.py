@@ -396,8 +396,7 @@ class OptionsSidebar(QFrame):
         текущая настройка: при ней у H.264 действуют значения видеокарты.
         """
         keys = [key for key, _kind in targets]
-        if not keys or all(fm.quality_effect(key, kind) == "none"
-                           for key, kind in targets):
+        if not keys or all(fm.quality_effect(key) == "none" for key in keys):
             self.quality_box.setVisible(False)
             return
         self.quality_box.setVisible(True)

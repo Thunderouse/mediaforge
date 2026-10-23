@@ -1879,13 +1879,14 @@ def test_second_engine_start_overwrites_again(media, tools, tmp_path):
 # Качество: где влияет, где нет
 # --------------------------------------------------------------------------- #
 def test_quality_effect_table():
-    assert fm.quality_effect("gif", "video") == "none"
-    assert fm.quality_effect("mp3", "audio") == "none"
-    assert fm.quality_effect("bmp", "image") == "none"
-    assert fm.quality_effect("mp4", "video") == "full"
-    assert fm.quality_effect("jpg", "image") == "full"
-    assert fm.quality_effect("png", "image") == "weak"
-    assert fm.quality_effect("неизвестный", "video") == "none"
+    assert fm.quality_effect("gif") == "none"
+    assert fm.quality_effect("mp3") == "none"
+    assert fm.quality_effect("bmp") == "none"
+    assert fm.quality_effect("mp4") == "full"
+    assert fm.quality_effect("jpg") == "full"
+    assert fm.quality_effect("png") == "weak"
+    assert fm.quality_effect("mkv264") == "full"
+    assert fm.quality_effect("неизвестный") == "none"
 
 
 def test_quality_hint_for_video_has_numbers():

@@ -166,8 +166,12 @@ _PNG_TIPS = {
 _AUDIO_TARGET_KEYS = frozenset(t.key for t in AUDIO_TARGETS)
 
 
-def quality_effect(target_key: str, kind: str = "") -> str:
-    """Насколько качество влияет на формат: full | weak | none."""
+def quality_effect(target_key: str) -> str:
+    """Насколько качество влияет на формат: full | weak | none.
+
+    Зависит только от формата: тип файла ничего не добавляет — анимированный GIF
+    и GIF-картинка идут одним ключом.
+    """
     return QUALITY_EFFECT.get(target_key, "none")
 
 

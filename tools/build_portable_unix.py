@@ -304,13 +304,17 @@ def build(target_key: str, out: Path, cache: Path, stage_dir: Path | None = None
     pbs = fetch(pbs_asset(cfg["triple"]), cache / f"pbs-{cfg['triple']}.tar.gz")
     # share/terminfo в python-build-standalone содержит симлинк-петли, которые
     # валят распаковку — эта папка приложению не нужна, пропускаем её
+    # filter="data" — фильтр PEP 706: отбрасывает абсолютные пути, ссылки за
+    # пределами stage и спецфайлы. С Python 3.14 он же по умолчанию, но явный
+    # аргумент убирает DeprecationWarning; на 3.11 фильтра ещё нет
+    extract_kwargs = {"filter": "data"} if sys.version_info >= (3, 12) else {}
     with tarfile.open(pbs) as tf:
         for member in tf:
             if "share/terminfo" in member.name:
                 continue
             try:
-                tf.extract(member, stage)
-            except (OSError, tarfile.ExtractError):
+                tf.extract(member, stage, **extract_kwargs)
+            except (OSError, tarfile.TarError):
                 continue
     if (stage / "python").exists() and not (stage / "python" / "bin").exists() and (stage / "python" / "install").exists():
         pass
