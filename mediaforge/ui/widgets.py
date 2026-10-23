@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 
 from PySide6.QtCore import (QPointF, QRectF, QSize, Qt, Signal)
@@ -137,6 +138,11 @@ class Segmented(QWidget):
             if k == key:
                 btn.setChecked(True)
                 return
+
+    def set_tooltips(self, tooltips: Sequence[str]) -> None:
+        """Подсказка на каждую кнопку; лишние строки игнорируются."""
+        for btn, tip in zip(self._group.buttons(), tooltips):
+            btn.setToolTip(tip or "")
 
 
 # --------------------------------------------------------------------------- #

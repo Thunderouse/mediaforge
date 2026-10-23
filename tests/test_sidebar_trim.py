@@ -117,3 +117,68 @@ def test_invalid_trim_turns_red_and_survives_theme(qapp):
 
     theme.apply("light")
     assert theme.current()["danger"] in side.trim_title.styleSheet()
+
+
+# --------------------------------------------------------------------------- #
+# Блок «Качество»: показывается только там, где влияет
+# --------------------------------------------------------------------------- #
+def _sidebar(qapp, settings: Settings | None = None) -> OptionsSidebar:
+    theme.apply("dark")
+    side = OptionsSidebar(settings or Settings())
+    side.resize(320, 900)
+    side.show()
+    qapp.processEvents()
+    return side
+
+
+def test_quality_hidden_for_gif_only(qapp):
+    side = _sidebar(qapp)
+    side.set_quality_context([("gif", "video")])
+    qapp.processEvents()
+
+    assert side.quality_box.isVisible() is False
+    assert side.cmb_resolution.isVisible() is True      # соседний блок на месте
+
+
+def test_quality_hidden_for_audio_only(qapp):
+    side = _sidebar(qapp)
+    side.set_quality_context([("mp3", "audio")])
+    qapp.processEvents()
+
+    assert side.quality_box.isVisible() is False
+
+
+def test_quality_visible_for_mp4_with_numbers(qapp):
+    side = _sidebar(qapp)
+    side.set_quality_context([("mp4", "video")])
+    qapp.processEvents()
+
+    assert side.quality_box.isVisible() is True
+    assert "CRF" in side.quality_hint.text()
+
+
+def test_quality_hint_mentions_mix(qapp):
+    side = _sidebar(qapp)
+    side.set_quality_context([("mp4", "video"), ("gif", "video")])
+    qapp.processEvents()
+
+    hint = side.quality_hint.text()
+    assert side.quality_box.isVisible() is True
+    assert "CRF 17" in hint and "GIF" in hint and "не влияет" in hint
+
+
+def test_quality_tooltips_filled(qapp):
+    side = _sidebar(qapp)
+    side.set_quality_context([("mp4", "video"), ("jpg", "image")])
+    qapp.processEvents()
+
+    tips = [btn.toolTip() for btn in side.seg_quality._group.buttons()]
+    assert len(tips) == 3
+    assert all(tip.strip() for tip in tips), tips
+    assert "CRF 17" in tips[0] and "JPEG/WebP/AVIF 95" in tips[0]
+
+
+def test_quality_segment_restores_saved_value(qapp):
+    side = _sidebar(qapp, Settings({"opt_quality": "small"}))
+    assert side.seg_quality.value() == "small"
+    assert side.seg_quality._group.buttons()[2].text() == "Размер"

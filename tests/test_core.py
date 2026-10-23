@@ -1862,3 +1862,78 @@ def test_second_engine_start_overwrites_again(media, tools, tmp_path):
 
     assert run_once() == ["a.gif"]
     assert run_once() == ["a.gif"], "второй запуск начал создавать суффиксы"
+
+
+# --------------------------------------------------------------------------- #
+# Качество: где влияет, где нет
+# --------------------------------------------------------------------------- #
+def test_quality_effect_table():
+    assert fm.quality_effect("gif", "video") == "none"
+    assert fm.quality_effect("mp3", "audio") == "none"
+    assert fm.quality_effect("bmp", "image") == "none"
+    assert fm.quality_effect("mp4", "video") == "full"
+    assert fm.quality_effect("jpg", "image") == "full"
+    assert fm.quality_effect("png", "image") == "weak"
+    assert fm.quality_effect("неизвестный", "video") == "none"
+
+
+def test_quality_hint_for_video_has_numbers():
+    hint = fm.quality_hint(["mp4"])
+    assert "CRF 17" in hint and "23" in hint and "28" in hint
+    assert "быстрее" in hint or "медленнее" in hint
+    assert "файл" in hint
+
+
+def test_quality_hint_for_gif_says_it_does_nothing():
+    hint = fm.quality_hint(["gif"])
+    assert "не влияет" in hint
+
+
+def test_quality_hint_for_mix_mentions_both():
+    hint = fm.quality_hint(["mp4", "gif"])
+    assert "CRF 17" in hint
+    assert "GIF" in hint and "не влияет" in hint
+
+
+def test_quality_hint_for_audio_and_png():
+    assert "не влияет" in fm.quality_hint(["mp3"])
+    png_hint = fm.quality_hint(["png"])
+    assert "без потерь" in png_hint and "9 / 7 / 9" in png_hint
+
+
+def test_quality_tooltips_have_numbers():
+    tips = fm.quality_tooltips(["mp4", "jpg"])
+    assert len(tips) == 3
+    assert all(tip.strip() for tip in tips)
+    assert "CRF 17" in tips[0] and "CRF 23" in tips[1] and "CRF 28" in tips[2]
+    assert "JPEG/WebP/AVIF 95" in tips[0]
+    assert "медленнее" in tips[0] and "быстрее" in tips[2]
+
+
+def test_quality_values_in_commands_unchanged(tools, media):
+    if "clip" not in media:
+        pytest.skip("нет тестового видео")
+    info = probe(media["clip"], tools)
+    for level, crf in (("high", "17"), ("balanced", "23"), ("small", "28")):
+        cmd, _ = build_video_cmd(media["clip"], Path("o.mp4"), info, fm.BY_KEY["mp4"],
+                                 fm.ConvertOptions(quality=level), tools)
+        joined = " ".join(cmd)
+        assert f"-crf {crf}" in joined, (level, joined[:200])
+
+    for level, crf in (("high", "20"), ("balanced", "26"), ("small", "31")):
+        cmd, _ = build_video_cmd(media["clip"], Path("o.mkv"), info, fm.BY_KEY["mkv"],
+                                 fm.ConvertOptions(quality=level), tools)
+        assert f"-crf {crf}" in " ".join(cmd)
+
+    assert [conv._IMG_QUALITY[lvl][0] for lvl in ("high", "balanced", "small")] == [95, 85, 72]
+
+
+def test_quality_setting_survives_reload(tmp_path, monkeypatch):
+    monkeypatch.setenv("MEDIAFORGE_CONFIG_DIR", str(tmp_path))
+    settings = Settings()
+    settings.set("opt_quality", "small")
+    settings.flush()
+
+    again = Settings.load()
+    assert again.options().quality == "small"
+    assert json.loads(config_path().read_text(encoding="utf-8"))["opt_quality"] == "small"

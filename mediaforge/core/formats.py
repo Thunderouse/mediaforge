@@ -82,9 +82,9 @@ def default_target(src_ext: str, kind: str) -> str:
 # --------------------------------------------------------------------------- #
 
 QUALITY_LABELS = (
-    ("high", "Максимум"),
+    ("high", "Качество"),
     ("balanced", "Баланс"),
-    ("small", "Меньше размер"),
+    ("small", "Размер"),
 )
 
 RESOLUTIONS = (
@@ -106,6 +106,124 @@ IMAGE_FILTERS = (
     ("bicubic", "Бикубический"),
     ("nearest", "Ближайший · пиксель-арт"),
 )
+
+# --------------------------------------------------------------------------- #
+# Качество: на что оно влияет и чем измеряется (единственное место с числами)
+# --------------------------------------------------------------------------- #
+
+QUALITY_LEVELS = ("high", "balanced", "small")
+
+# full — качество реально меняет результат, weak — едва заметно, none — не влияет
+QUALITY_EFFECT = {
+    "mp4": "full", "mov": "full", "mkv": "full", "mkv264": "full",
+    "webm": "full", "avi": "full",
+    "jpg": "full", "webp": "full", "avif": "full",
+    "png": "weak",
+    "tiff": "none", "bmp": "none", "ico": "none", "pdf": "none",
+    "gif_img": "none", "gif": "none",
+    "mp3": "none", "m4a": "none", "wav": "none", "flac": "none",
+    "opus": "none", "ogg": "none",
+}
+
+# кодек по цели и его значения для high / balanced / small
+_QUALITY_FAMILY = {
+    "mp4": "H.264", "mov": "H.264", "mkv264": "H.264",
+    "mkv": "H.265", "webm": "VP9", "avi": "MPEG-4",
+    "jpg": "JPEG/WebP/AVIF", "webp": "JPEG/WebP/AVIF", "avif": "JPEG/WebP/AVIF",
+}
+
+_QUALITY_LEVELS = {
+    "H.264": ("CRF 17", "CRF 23", "CRF 28"),
+    "H.265": ("CRF 20", "CRF 26", "CRF 31"),
+    "VP9": ("CRF 24", "CRF 32", "CRF 40"),
+    "MPEG-4": ("q 2", "q 4", "q 7"),
+    "JPEG/WebP/AVIF": ("95", "85", "72"),
+}
+
+_AUDIO_TARGET_KEYS = frozenset(t.key for t in AUDIO_TARGETS)
+
+
+def quality_effect(target_key: str, kind: str = "") -> str:
+    """Насколько качество влияет на формат: full | weak | none."""
+    return QUALITY_EFFECT.get(target_key, "none")
+
+
+def _family_short(family: str) -> str:
+    values = _QUALITY_LEVELS[family]
+    if family == "JPEG/WebP/AVIF":
+        return " / ".join(values)
+    prefix = values[0].split()[0]                 # CRF | q
+    return f"{prefix} " + " / ".join(v.split()[-1] for v in values)
+
+
+def _families(target_keys) -> list[str]:
+    ordered: list[str] = []
+    for key in target_keys:
+        family = _QUALITY_FAMILY.get(key)
+        if family and family not in ordered:
+            ordered.append(family)
+    return ordered
+
+
+def _none_note(keys) -> str:
+    bits = []
+    if any(key in ("gif", "gif_img") for key in keys):
+        bits.append("на GIF качество не влияет: палитра фиксирована (256 цветов), "
+                    "размер задают FPS, разрешение и фрагмент")
+    if any(key in _AUDIO_TARGET_KEYS for key in keys):
+        bits.append("на извлечение звука качество не влияет: размер задаёт битрейт")
+    if not bits:
+        bits.append("на эти форматы качество не влияет")
+    text = "; ".join(bits)
+    return text[:1].upper() + text[1:] + "."
+
+
+def quality_hint(target_keys) -> str:
+    """Человеческое объяснение выбранного качества для текущих целей очереди."""
+    keys = [key for key in dict.fromkeys(target_keys) if key]
+    if not keys:
+        return ""
+    effects = [quality_effect(key) for key in keys]
+    families = _families(keys)
+
+    parts: list[str] = []
+    if families:
+        numbers = " · ".join(f"{family} — {_family_short(family)}" for family in families)
+        parts.append(f"Качество: {numbers}.")
+        parts.append("Меньше значение — лучше картинка и больше файл; "
+                     "«Качество» кодирует медленнее, «Размер» — быстрее.")
+    if "weak" in effects:
+        parts.append("PNG сжимается без потерь: меняется только уровень сжатия "
+                     "(9 / 7 / 9), картинка та же.")
+    if "none" in effects:
+        parts.append(_none_note(keys))
+    return " ".join(parts)
+
+
+def quality_tooltips(target_keys) -> tuple[str, str, str]:
+    """Тултипы кнопок «Качество / Баланс / Размер» с числами для текущих целей."""
+    keys = [key for key in dict.fromkeys(target_keys) if key]
+    families = _families(keys)
+    effects = [quality_effect(key) for key in keys]
+
+    tips: list[str] = []
+    for index, level in enumerate(QUALITY_LEVELS):
+        if families:
+            numbers = " · ".join(f"{family} {_QUALITY_LEVELS[family][index]}"
+                                 for family in families)
+        elif "weak" in effects:
+            numbers = "PNG — уровень сжатия 9 / 7 / 9"
+        else:
+            numbers = "на эти форматы качество не влияет"
+        tips.append({
+            "high": f"Максимум: {numbers}. Лучшая картинка, самый большой файл, "
+                    "кодирование медленнее.",
+            "balanced": f"Баланс: {numbers}. Обычный выбор для большинства задач.",
+            "small": f"Меньше размер: {numbers}. Файл меньше, детали мягче, "
+                     "кодирование быстрее.",
+        }[level])
+    return (tips[0], tips[1], tips[2])
+
 
 # то, что реально принимают команды и UI (для валидации настроек)
 QUALITY_VALUES = tuple(key for key, _ in QUALITY_LABELS)

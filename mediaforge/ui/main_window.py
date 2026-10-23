@@ -634,6 +634,8 @@ class MainWindow(QMainWindow):
 
     def _update_option_visibility(self) -> None:
         """Какие блоки параметров нужны для текущей очереди (сайдбар не знает Job)."""
+        self.sidebar.set_quality_context(
+            [(job.target.key, job.info.kind) for job in self.jobs])
         self.sidebar.update_option_visibility(
             has_media=any(j.info.kind in ("video", "audio") for j in self.jobs),
             has_image=any(j.info.kind == "image" for j in self.jobs),

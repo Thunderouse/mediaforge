@@ -98,11 +98,20 @@ class OptionsSidebar(QFrame):
 
         opts = settings.options()
 
-        lay.addWidget(self._section("Качество"))
+        self.quality_box = QWidget()
+        ql = QVBoxLayout(self.quality_box)
+        ql.setContentsMargins(0, 0, 0, 0)
+        ql.setSpacing(6)
+        ql.addWidget(self._section("Качество и размер"))
         self.seg_quality = Segmented(fm.QUALITY_LABELS)
         self.seg_quality.setValue(opts.quality)
         self.seg_quality.changed.connect(lambda v: self.optionChanged.emit("quality", v))
-        lay.addWidget(self.seg_quality)
+        ql.addWidget(self.seg_quality)
+        self.quality_hint = QLabel("")
+        self.quality_hint.setObjectName("hint")
+        self.quality_hint.setWordWrap(True)
+        ql.addWidget(self.quality_hint)
+        lay.addWidget(self.quality_box)
 
         lay.addSpacing(2)
         lay.addWidget(self._field_label("Разрешение"))
@@ -379,6 +388,20 @@ class OptionsSidebar(QFrame):
     # ------------------------------------------------------------------ #
     # Внешний API (то, что нужно окну)
     # ------------------------------------------------------------------ #
+    def set_quality_context(self, targets: list[tuple[str, str]]) -> None:
+        """Показывает качество только там, где оно что-то меняет.
+
+        `targets` — пары (ключ формата, тип файла) по всей очереди.
+        """
+        keys = [key for key, _kind in targets]
+        if not keys or all(fm.quality_effect(key, kind) == "none"
+                           for key, kind in targets):
+            self.quality_box.setVisible(False)
+            return
+        self.quality_box.setVisible(True)
+        self.quality_hint.setText(fm.quality_hint(keys))
+        self.seg_quality.set_tooltips(fm.quality_tooltips(keys))
+
     def update_option_visibility(
         self, has_media: bool, has_image: bool, has_gif: bool, has_audio: bool,
     ) -> None:
