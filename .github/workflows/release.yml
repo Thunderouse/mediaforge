@@ -25,11 +25,21 @@ jobs:
           echo "версия в коде: $version · тег: $GITHUB_REF_NAME"
           test "$version" = "${GITHUB_REF_NAME#v}"
 
-      - name: тесты ядра
+      - name: ffmpeg для тестов ядра
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+          ffmpeg -version | head -1
+          ffprobe -version | head -1
+
+      - name: тесты ядра (с ffmpeg, без пропусков)
         run: |
           python -m pip install --upgrade pip
           python -m pip install pytest pillow
-          python -m pytest -q tests/test_core.py
+          python -m pytest tests/test_core.py -q -rs --junitxml=pytest-core.xml
+          # пропуск теста = гейт не пройден: без ffmpeg половина набора молча
+          # выпадает, и релиз собирается по непроверенному коду
+          python -c "import sys, xml.etree.ElementTree as ET; root = ET.parse('pytest-core.xml').getroot(); s = root if root.tag == 'testsuite' else root.find('testsuite'); t = int(s.get('tests', 0)); f = int(s.get('failures', 0)) + int(s.get('errors', 0)); k = int(s.get('skipped', 0)); print(f'итог: passed={t - f - k}, failed={f}, skipped={k}'); sys.exit(1 if (k or f) else 0)"
 
       - name: инструменты сборки
         run: |
