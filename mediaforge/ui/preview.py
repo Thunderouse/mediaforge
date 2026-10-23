@@ -99,6 +99,12 @@ class Filmstrip(QWidget):
         if self._drag == "start":
             self._start = min(t, self._end - 0.1)
             self._start = max(0.0, self._start)
+            # просмотр едет за ручкой: маркер, ползунок и кадр обновляются сразу,
+            # а не только после отпускания
+            self._pos = self._start
+            self.update()
+            self.seeked.emit(self._pos)
+            return
         else:
             self._end = max(t, self._start + 0.1)
             self._end = min(self._duration, self._end)
@@ -586,11 +592,18 @@ class PreviewPanel(QWidget):
     def _on_seek(self, seconds: float) -> None:
         if self._job is None:
             return
+        if self._player is not None:
+            # перетаскивание ручки прерывает проигрывание, фрагмент не сбрасываем
+            self._stop_playback()
+            self.btn_play.setChecked(False)
         duration = max(0.001, self._job.info.duration)
+        # blockSignals: иначе slider.valueChanged вернётся в _on_slider и пойдёт цикл
         self.slider.blockSignals(True)
         self.slider.setValue(int(seconds / duration * 1000))
         self.slider.blockSignals(False)
+        self.strip.set_position(seconds)
         self._update_caption()
+        self._timer.start()               # кадр перезапрашивается с дебаунсом
 
     def _on_strip_trim(self, start: float, end: float) -> None:
         self._trim = (start, end)
