@@ -388,10 +388,12 @@ class OptionsSidebar(QFrame):
     # ------------------------------------------------------------------ #
     # Внешний API (то, что нужно окну)
     # ------------------------------------------------------------------ #
-    def set_quality_context(self, targets: list[tuple[str, str]]) -> None:
+    def set_quality_context(self, targets: list[tuple[str, str]],
+                            gpu: bool = False) -> None:
         """Показывает качество только там, где оно что-то меняет.
 
-        `targets` — пары (ключ формата, тип файла) по всей очереди.
+        `targets` — пары (ключ формата, тип файла) по всей очереди, `gpu` —
+        текущая настройка: при ней у H.264 действуют значения видеокарты.
         """
         keys = [key for key, _kind in targets]
         if not keys or all(fm.quality_effect(key, kind) == "none"
@@ -399,8 +401,8 @@ class OptionsSidebar(QFrame):
             self.quality_box.setVisible(False)
             return
         self.quality_box.setVisible(True)
-        self.quality_hint.setText(fm.quality_hint(keys))
-        self.seg_quality.set_tooltips(fm.quality_tooltips(keys))
+        self.quality_hint.setText(fm.quality_hint(keys, gpu=gpu))
+        self.seg_quality.set_tooltips(fm.quality_tooltips(keys, gpu=gpu))
 
     def update_option_visibility(
         self, has_media: bool, has_image: bool, has_gif: bool, has_audio: bool,

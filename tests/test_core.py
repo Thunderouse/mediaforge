@@ -1880,8 +1880,35 @@ def test_quality_effect_table():
 def test_quality_hint_for_video_has_numbers():
     hint = fm.quality_hint(["mp4"])
     assert "CRF 17" in hint and "23" in hint and "28" in hint
-    assert "быстрее" in hint or "медленнее" in hint
-    assert "файл" in hint
+    assert "Меньше" in hint, "у видео меньше CRF — лучше"
+    assert "медленнее" in hint and "файл" in hint
+
+
+def test_quality_hint_for_images_says_more_is_better():
+    hint = fm.quality_hint(["jpg"])
+    assert "95" in hint and "85" in hint and "72" in hint
+    assert "Больше" in hint, "у картинок больше quality — лучше"
+    assert "Меньше значение" not in hint
+
+
+def test_quality_hint_for_mix_has_both_directions():
+    hint = fm.quality_hint(["mp4", "jpg"])
+    assert "Меньше" in hint and "Больше" in hint
+    assert "CRF 17" in hint and "95" in hint
+
+
+def test_quality_hint_switches_to_gpu_values():
+    hint = fm.quality_hint(["mp4"], gpu=True)
+    assert "CRF 17" not in hint
+    assert "NVENC" in hint and "CQ 20" in hint
+    assert "VideoToolbox" in hint
+    assert "CPU" in hint, "нужна оговорка про откат на CPU"
+
+
+def test_quality_hint_gpu_does_not_touch_h265():
+    """GPU-ветка в convert.py есть только у H.264 — у MKV остаётся CRF."""
+    hint = fm.quality_hint(["mkv"], gpu=True)
+    assert "CRF 20" in hint and "NVENC" not in hint
 
 
 def test_quality_hint_for_gif_says_it_does_nothing():
@@ -1898,7 +1925,28 @@ def test_quality_hint_for_mix_mentions_both():
 def test_quality_hint_for_audio_and_png():
     assert "не влияет" in fm.quality_hint(["mp3"])
     png_hint = fm.quality_hint(["png"])
-    assert "без потерь" in png_hint and "9 / 7 / 9" in png_hint
+    assert "без потерь" in png_hint
+    assert "9" in png_hint and "7" in png_hint
+    assert "«Размер»" in png_hint, "совпадение уровней 9/9 нужно назвать"
+
+
+def test_png_tooltips_differ_or_explain_match():
+    tips = fm.quality_tooltips(["png"])
+    assert len(set(tips)) == 3, tips
+    assert "столько же" in tips[0] and "столько же" in tips[2]
+
+
+def test_tooltips_start_with_button_labels():
+    for keys in (["mp4"], ["jpg"], ["mp4", "jpg"], ["png"]):
+        tips = fm.quality_tooltips(keys)
+        labels = [label for _key, label in fm.QUALITY_LABELS]
+        for tip, label in zip(tips, labels):
+            assert tip.startswith(f"{label}:"), (keys, tip)
+
+
+def test_tooltips_use_gpu_values():
+    tips = fm.quality_tooltips(["mp4"], gpu=True)
+    assert "NVENC CQ 20" in tips[0] and "CRF 17" not in tips[0]
 
 
 def test_quality_tooltips_have_numbers():

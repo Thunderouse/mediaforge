@@ -18,6 +18,8 @@ try:                       # на headless-машинах часто нет libE
     from PySide6.QtWidgets import QApplication
 
     from mediaforge.core.config import Settings
+    from mediaforge.core.engine import Job
+    from mediaforge.core.ffmpeg import MediaInfo
     from mediaforge.ui import theme
     from mediaforge.ui.options_sidebar import OptionsSidebar, TimecodeValidator
 except ImportError as exc:  # noqa: BLE001
@@ -182,3 +184,38 @@ def test_quality_segment_restores_saved_value(qapp):
     side = _sidebar(qapp, Settings({"opt_quality": "small"}))
     assert side.seg_quality.value() == "small"
     assert side.seg_quality._group.buttons()[2].text() == "Размер"
+
+
+def test_quality_hint_follows_gpu_flag(qapp):
+    side = _sidebar(qapp)
+    side.set_quality_context([("mp4", "video")])
+    qapp.processEvents()
+    assert "CRF 17" in side.quality_hint.text()
+
+    side.set_quality_context([("mp4", "video")], gpu=True)
+    qapp.processEvents()
+    hint = side.quality_hint.text()
+    assert "NVENC" in hint and "CRF 17" not in hint
+    assert "CRF 17" not in side.seg_quality._group.buttons()[0].toolTip()
+
+
+def test_window_passes_gpu_to_sidebar(qapp, monkeypatch, tmp_path):
+    """Переключение GPU в сайдбаре сразу меняет подсказку качества."""
+    from pathlib import Path
+
+    import mediaforge.ui.main_window as mw
+
+    monkeypatch.setenv("MEDIAFORGE_CONFIG_DIR", str(tmp_path))
+    theme.apply("dark")
+    win = mw.MainWindow(Settings({"opt_gpu": True}), None, "ffmpeg не найден")
+    src = Path("x.mp4")
+    win.jobs.append(Job(src=src, info=MediaInfo(path=src, kind="video", duration=5.0),
+                        target=mw.fm.BY_KEY["mp4"]))
+    win._update_option_visibility()
+    qapp.processEvents()
+    assert "NVENC" in win.sidebar.quality_hint.text()
+
+    win.sidebar.chk_gpu.setChecked(False)
+    qapp.processEvents()
+    assert "CRF 17" in win.sidebar.quality_hint.text()
+    assert win.settings.get("opt_gpu") is False

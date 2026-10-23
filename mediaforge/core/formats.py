@@ -112,6 +112,7 @@ IMAGE_FILTERS = (
 # --------------------------------------------------------------------------- #
 
 QUALITY_LEVELS = ("high", "balanced", "small")
+_LEVEL_LABEL = dict(QUALITY_LABELS)
 
 # full — качество реально меняет результат, weak — едва заметно, none — не влияет
 QUALITY_EFFECT = {
@@ -125,7 +126,7 @@ QUALITY_EFFECT = {
     "opus": "none", "ogg": "none",
 }
 
-# кодек по цели и его значения для high / balanced / small
+# кодек по цели и его значения для high / balanced / small (CPU-ветка convert.py)
 _QUALITY_FAMILY = {
     "mp4": "H.264", "mov": "H.264", "mkv264": "H.264",
     "mkv": "H.265", "webm": "VP9", "avi": "MPEG-4",
@@ -140,6 +141,28 @@ _QUALITY_LEVELS = {
     "JPEG/WebP/AVIF": ("95", "85", "72"),
 }
 
+_IMAGE_FAMILY = "JPEG/WebP/AVIF"
+
+# GPU-ветка есть только у H.264 (h264_args в convert.py): у H.265/VP9 её нет
+_GPU_TARGETS = frozenset({"mp4", "mov", "mkv264"})
+_GPU_LEVELS = (
+    ("NVENC", ("CQ 20", "CQ 25", "CQ 31")),
+    ("QSV/AMF", ("21", "26", "32")),
+    ("VideoToolbox", ("60", "50", "40")),
+)
+
+_SPEED_NOTE = {
+    "high": "Лучшая картинка, самый большой файл, кодирование медленнее.",
+    "balanced": "Обычный выбор для большинства задач.",
+    "small": "Файл меньше, детали мягче, кодирование быстрее.",
+}
+
+_PNG_TIPS = {
+    "high": "PNG без потерь, уровень 9 — столько же у «Размер»; картинка не меняется.",
+    "balanced": "PNG без потерь, уровень 7 — сжатие быстрее, файл чуть больше.",
+    "small": "PNG без потерь, уровень 9 — столько же у «Качество»; файл минимальный.",
+}
+
 _AUDIO_TARGET_KEYS = frozenset(t.key for t in AUDIO_TARGETS)
 
 
@@ -150,7 +173,7 @@ def quality_effect(target_key: str, kind: str = "") -> str:
 
 def _family_short(family: str) -> str:
     values = _QUALITY_LEVELS[family]
-    if family == "JPEG/WebP/AVIF":
+    if family == _IMAGE_FAMILY:
         return " / ".join(values)
     prefix = values[0].split()[0]                 # CRF | q
     return f"{prefix} " + " / ".join(v.split()[-1] for v in values)
@@ -163,6 +186,14 @@ def _families(target_keys) -> list[str]:
         if family and family not in ordered:
             ordered.append(family)
     return ordered
+
+
+def _uses_gpu(keys) -> bool:
+    return any(key in _GPU_TARGETS for key in keys)
+
+
+def _gpu_row(index: int) -> str:
+    return " · ".join(f"{name} {values[index]}" for name, values in _GPU_LEVELS)
 
 
 def _none_note(keys) -> str:
@@ -178,50 +209,70 @@ def _none_note(keys) -> str:
     return text[:1].upper() + text[1:] + "."
 
 
-def quality_hint(target_keys) -> str:
-    """Человеческое объяснение выбранного качества для текущих целей очереди."""
+def quality_hint(target_keys, gpu: bool = False) -> str:
+    """Человеческое объяснение выбранного качества для текущих целей очереди.
+
+    Направление разное: у видео меньше CRF/q — лучше, у картинок больше
+    quality — лучше. При включённом GPU у H.264 показываем значения
+    кодировщиков видеокарты, а не CRF.
+    """
     keys = [key for key in dict.fromkeys(target_keys) if key]
     if not keys:
         return ""
     effects = [quality_effect(key) for key in keys]
     families = _families(keys)
+    video = [family for family in families if family != _IMAGE_FAMILY]
+    images = [family for family in families if family == _IMAGE_FAMILY]
+    gpu_video = gpu and _uses_gpu(keys) and bool(video)
 
     parts: list[str] = []
-    if families:
-        numbers = " · ".join(f"{family} — {_family_short(family)}" for family in families)
-        parts.append(f"Качество: {numbers}.")
-        parts.append("Меньше значение — лучше картинка и больше файл; "
-                     "«Качество» кодирует медленнее, «Размер» — быстрее.")
+    if video:
+        if gpu_video:
+            rows = " · ".join(f"{name} {values[0]} / {values[1]} / {values[2]}"
+                              for name, values in _GPU_LEVELS)
+            parts.append(f"Видео через GPU: {rows}. Меньше значение — лучше картинка, "
+                         "но больше файл; без подходящей видеокарты остаётся CPU "
+                         "с обычными значениями.")
+        else:
+            numbers = " · ".join(f"{family} — {_family_short(family)}" for family in video)
+            parts.append(f"Видео: {numbers}. Меньше значение — лучше картинка, "
+                         "но больше файл и медленнее кодирование.")
+    if images:
+        parts.append(f"Картинки: {_family_short(_IMAGE_FAMILY)}. Больше значение — "
+                     "лучше картинка, но больше файл.")
     if "weak" in effects:
-        parts.append("PNG сжимается без потерь: меняется только уровень сжатия "
-                     "(9 / 7 / 9), картинка та же.")
+        parts.append("PNG без потерь: уровень 9 у «Качество» и «Размер», 7 у «Баланса» — "
+                     "картинка не меняется, различается только скорость сжатия.")
     if "none" in effects:
         parts.append(_none_note(keys))
     return " ".join(parts)
 
 
-def quality_tooltips(target_keys) -> tuple[str, str, str]:
-    """Тултипы кнопок «Качество / Баланс / Размер» с числами для текущих целей."""
+def quality_tooltips(target_keys, gpu: bool = False) -> tuple[str, str, str]:
+    """Тултипы кнопок качества: те же названия, что на кнопках, и числа целей."""
     keys = [key for key in dict.fromkeys(target_keys) if key]
     families = _families(keys)
     effects = [quality_effect(key) for key in keys]
+    video = [family for family in families if family != _IMAGE_FAMILY]
+    images = [family for family in families if family == _IMAGE_FAMILY]
+    gpu_video = gpu and _uses_gpu(keys) and bool(video)
 
     tips: list[str] = []
     for index, level in enumerate(QUALITY_LEVELS):
-        if families:
-            numbers = " · ".join(f"{family} {_QUALITY_LEVELS[family][index]}"
-                                 for family in families)
+        prefix = f"{_LEVEL_LABEL[level]}: "
+        numbers: list[str] = []
+        if video:
+            numbers.append(f"GPU {_gpu_row(index)}" if gpu_video else
+                           " · ".join(f"{family} {_QUALITY_LEVELS[family][index]}"
+                                      for family in video))
+        if images:
+            numbers.append(f"JPEG/WebP/AVIF {_QUALITY_LEVELS[_IMAGE_FAMILY][index]}")
+        if numbers:
+            tips.append(prefix + " · ".join(numbers) + ". " + _SPEED_NOTE[level])
         elif "weak" in effects:
-            numbers = "PNG — уровень сжатия 9 / 7 / 9"
+            tips.append(prefix + _PNG_TIPS[level])
         else:
-            numbers = "на эти форматы качество не влияет"
-        tips.append({
-            "high": f"Максимум: {numbers}. Лучшая картинка, самый большой файл, "
-                    "кодирование медленнее.",
-            "balanced": f"Баланс: {numbers}. Обычный выбор для большинства задач.",
-            "small": f"Меньше размер: {numbers}. Файл меньше, детали мягче, "
-                     "кодирование быстрее.",
-        }[level])
+            tips.append(prefix + "на эти форматы качество не влияет")
     return (tips[0], tips[1], tips[2])
 
 

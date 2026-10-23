@@ -368,7 +368,7 @@ class MainWindow(QMainWindow):
     def _build_sidebar(self) -> QWidget:
         """Правая колонка: параметры и кнопки живут в OptionsSidebar."""
         self.sidebar = OptionsSidebar(self.settings)
-        self.sidebar.optionChanged.connect(self._set_opt)
+        self.sidebar.optionChanged.connect(self._on_option_changed)
         self.sidebar.trimEdited.connect(
             lambda start, end: self._apply_trim(start, end, from_preview=False))
         self.sidebar.useSourceDirChanged.connect(self._on_source_dir_toggled)
@@ -635,7 +635,9 @@ class MainWindow(QMainWindow):
     def _update_option_visibility(self) -> None:
         """Какие блоки параметров нужны для текущей очереди (сайдбар не знает Job)."""
         self.sidebar.set_quality_context(
-            [(job.target.key, job.info.kind) for job in self.jobs])
+            [(job.target.key, job.info.kind) for job in self.jobs],
+            gpu=bool(self.settings.get("opt_gpu")),
+        )
         self.sidebar.update_option_visibility(
             has_media=any(j.info.kind in ("video", "audio") for j in self.jobs),
             has_image=any(j.info.kind == "image" for j in self.jobs),
@@ -689,6 +691,11 @@ class MainWindow(QMainWindow):
     def _set_opt(self, name: str, value) -> None:
         self.settings.set(f"opt_{name}", value)
         self.settings.save()
+
+    def _on_option_changed(self, name: str, value) -> None:
+        self._set_opt(name, value)
+        if name == "gpu":              # подсказки качества зависят от кодировщика
+            self._update_option_visibility()
 
     def _on_source_dir_toggled(self, checked: bool) -> None:
         self.settings.set("use_source_dir", bool(checked))
