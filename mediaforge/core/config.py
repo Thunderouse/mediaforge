@@ -260,20 +260,34 @@ class Settings:
             timer.start()
 
     def flush(self) -> None:
-        """Немедленная атомарная запись: tmp-файл + os.replace."""
+        """Немедленная атомарная запись: свой tmp-файл + os.replace.
+
+        Лок держится на всю запись, а не только на снимок данных: иначе таймер
+        дебаунса и closeEvent могли писать в один и тот же tmp одновременно, и
+        один поток replace'ил файл, пока второй дописывал в него.
+        Имя tmp уникально для вызова — на случай двух экземпляров Settings.
+        """
         with self._save_lock:
             if self._save_timer is not None:
                 self._save_timer.cancel()
                 self._save_timer = None
             data = dict(self._data)
-        try:
-            config_dir().mkdir(parents=True, exist_ok=True)
-            path = config_path()
-            tmp = path.with_name(f"{path.name}.tmp")
-            tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), "utf-8")
-            os.replace(tmp, path)      # не оставляет полузаписанный settings.json
-        except OSError:
-            pass
+            try:
+                config_dir().mkdir(parents=True, exist_ok=True)
+                path = config_path()
+                tmp = path.with_name(
+                    f"{path.name}.{os.getpid()}-{os.urandom(3).hex()}.tmp")
+                try:
+                    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), "utf-8")
+                    os.replace(tmp, path)   # читатель видит либо старый, либо новый файл
+                finally:
+                    if tmp.exists():        # replace не сработал — убираем за собой
+                        try:
+                            tmp.unlink()
+                        except OSError:
+                            pass
+            except OSError:
+                pass
 
     # ------------------------------------------------------------------ #
     def sanitize(self, log_problems: bool = False) -> list[str]:

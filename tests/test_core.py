@@ -1541,9 +1541,21 @@ def test_cancel_with_noisy_stderr_is_still_fast(media, tools, tmp_path):
 # --------------------------------------------------------------------------- #
 # Технические долги: дебаунс, атомарность, таймаут
 # --------------------------------------------------------------------------- #
+class _ConfigOsShim:
+    """os для monkeypatch внутри config: replace подменён, остальное настоящее."""
+
+    def __init__(self, replace):
+        self._replace = replace
+
+    def replace(self, src, dst):
+        return self._replace(src, dst)
+
+    def __getattr__(self, name):
+        return getattr(os, name)
+
+
 def test_save_is_debounced(tmp_path, monkeypatch):
     """Восемь изменений подряд — одна запись файла, и та после паузы."""
-    import types
 
     import mediaforge.core.config as cfg_mod
 
@@ -1558,8 +1570,7 @@ def test_save_is_debounced(tmp_path, monkeypatch):
         return real_replace(src, dst)
 
     # подменяем os только внутри config: глобальный патч ломает соседние тесты
-    monkeypatch.setattr(cfg_mod, "os", types.SimpleNamespace(
-        environ=os.environ, name=os.name, replace=counting_replace))
+    monkeypatch.setattr(cfg_mod, "os", _ConfigOsShim(counting_replace))
 
     for i in range(8):
         settings.set("opt_image_width", str(1920 + i))
@@ -1985,3 +1996,96 @@ def test_quality_setting_survives_reload(tmp_path, monkeypatch):
     again = Settings.load()
     assert again.options().quality == "small"
     assert json.loads(config_path().read_text(encoding="utf-8"))["opt_quality"] == "small"
+
+
+# --------------------------------------------------------------------------- #
+# Настройки: одновременная запись не портит файл
+# --------------------------------------------------------------------------- #
+def test_concurrent_flush_keeps_settings_valid(tmp_path, monkeypatch):
+    """Два потока пишут одновременно: файл не портится, tmp-файлов не остаётся."""
+    import mediaforge.core.config as cfg_mod
+
+    monkeypatch.setenv("MEDIAFORGE_CONFIG_DIR", str(tmp_path))
+    settings = Settings()
+    path = config_path()
+
+    replaces: list[str] = []
+
+    def spy_replace(src, dst):
+        replaces.append(str(src))
+        return os.replace(src, dst)
+
+    # подменяем os только внутри config: общий os.replace ломает соседние тесты
+    monkeypatch.setattr(cfg_mod, "os", _ConfigOsShim(spy_replace))
+
+    stop = threading.Event()
+    corrupt: list[str] = []
+    reads = 0
+
+    def writer(tag: str) -> None:
+        for i in range(50):
+            settings.set("opt_image_width", f"{tag}{i}")
+            settings.flush()
+
+    def reader() -> None:
+        nonlocal reads
+        while not stop.is_set():
+            text = None
+            try:
+                text = path.read_text(encoding="utf-8")
+                data = json.loads(text)
+            except FileNotFoundError:
+                continue                        # ещё не создан — нормально
+            except (json.JSONDecodeError, OSError) as exc:
+                # на неатомарных ФС (FUSE, сетевые шары) читатель может поймать
+                # момент подмены: файл обязан быть целым «в покое», а не в кадре
+                for _ in range(3):
+                    time.sleep(0.02)
+                    try:
+                        text = path.read_text(encoding="utf-8")
+                        data = json.loads(text)
+                    except (json.JSONDecodeError, OSError):
+                        continue
+                    break
+                else:
+                    corrupt.append(f"{type(exc).__name__}: {exc} :: {text!r}")
+                    continue
+            reads += 1
+            assert isinstance(data, dict)
+
+    threads = [threading.Thread(target=writer, args=("a",)),
+               threading.Thread(target=writer, args=("b",))]
+    reader_thread = threading.Thread(target=reader)
+    reader_thread.start()
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(60)
+        assert not thread.is_alive()
+    stop.set()
+    reader_thread.join(10)
+
+    assert corrupt == [], corrupt[:3]
+    assert reads > 0
+    # tmp-файл у каждой записи свой: одно имя на всех = гонка в os.replace
+    assert len(set(replaces)) == len(replaces), sorted(set(replaces))[:3]
+    assert json.loads(path.read_text(encoding="utf-8"))["opt_image_width"] in {
+        f"{tag}{i}" for tag in ("a", "b") for i in range(50)}
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["settings.json"]
+
+
+def test_flush_during_debounce_leaves_no_tmp(tmp_path, monkeypatch):
+    """Ручной flush во время работы таймера дебаунса: без мусора и валидный JSON."""
+    monkeypatch.setenv("MEDIAFORGE_CONFIG_DIR", str(tmp_path))
+    settings = Settings()
+
+    for i in range(5):
+        settings.set("opt_image_width", str(1000 + i))
+        settings.save()          # планирует запись через SAVE_DELAY
+        settings.flush()         # и сразу пишет вручную
+    time.sleep(0.5)              # таймер успевает сработать
+
+    leftovers = [p.name for p in tmp_path.iterdir() if p.name != "settings.json"]
+    assert leftovers == [], leftovers
+    data = json.loads(config_path().read_text(encoding="utf-8"))
+    assert data["opt_image_width"] == "1004"
