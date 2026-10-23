@@ -216,3 +216,75 @@ def test_seek_without_job_and_without_tools(qapp):
 
     assert panel.slider.value() == 0
     assert panel._timer.isActive() is False
+
+
+# --------------------------------------------------------------------------- #
+# Подпись фрагмента во время перетаскивания
+# --------------------------------------------------------------------------- #
+def _timeline_panel(qapp, monkeypatch, duration: float = 30.0) -> PreviewPanel:
+    """Панель с полоской кадров: без tools она таймлайна не получает вовсе."""
+    panel = PreviewPanel(object())
+    monkeypatch.setattr(panel._pool, "submit", lambda *a, **k: None)  # без ffmpeg
+    src = Path(__file__)
+    job = Job(src=src, info=MediaInfo(path=src, kind="video", duration=duration),
+              target=fm.BY_KEY["mp4"])
+    panel.set_jobs([job])
+    panel.strip.resize(300, 64)
+    panel.show()
+    qapp.processEvents()
+    return panel
+
+
+def test_caption_follows_start_handle_while_dragging(qapp, monkeypatch):
+    panel = _timeline_panel(qapp, monkeypatch)
+    emitted: list[tuple[float, float]] = []
+    panel.trimChanged.connect(lambda a, b: emitted.append((a, b)))
+
+    panel.strip.mousePressEvent(_Mouse(2))
+    panel.strip.mouseMoveEvent(_Mouse(panel.strip.width() * 0.5))
+    qapp.processEvents()
+
+    start = panel.strip._start
+    text = panel.caption.text()
+    assert start == pytest.approx(15.0, abs=0.6)
+    assert f"{start:.1f} с" in text, text
+    assert "весь файл" not in text, text
+    assert "–конец" in text, text
+    assert emitted == [], "trimChanged — только на отпускании"
+    assert panel._trim == (0.0, 0.0), "настройки до отпускания не трогаем"
+
+
+def test_caption_updates_throughout_drag_and_once_on_release(qapp, monkeypatch):
+    panel = _timeline_panel(qapp, monkeypatch)
+    emitted: list[tuple[float, float]] = []
+    panel.trimChanged.connect(lambda a, b: emitted.append((a, b)))
+
+    panel.strip.mousePressEvent(_Mouse(2))
+    seen: list[str] = []
+    for fraction in (0.2, 0.35, 0.5, 0.65):
+        panel.strip.mouseMoveEvent(_Mouse(panel.strip.width() * fraction))
+        qapp.processEvents()
+        seen.append(panel.caption.text())
+    panel.strip.mouseReleaseEvent(_Mouse(panel.strip.width() * 0.65))
+
+    starts = [text.split("фрагмент ")[1].split("–")[0] for text in seen if "фрагмент " in text]
+    assert len(set(starts)) > 1, starts            # подпись едет вместе с ручкой
+    assert len(emitted) == 1, emitted
+    start, end = emitted[0]
+    assert start == pytest.approx(panel.strip._start, abs=0.01) and end == 0
+    assert start == pytest.approx(19.5, abs=1.5), start
+    assert panel._trim[0] == pytest.approx(start) and panel._trim[1] == 0
+
+
+def test_caption_after_plain_seek_keeps_old_trim(qapp, monkeypatch):
+    """Клик по полоске не выдаёт текущий фрагмент за обрезанный."""
+    panel = _timeline_panel(qapp, monkeypatch)
+    panel.apply_trim(5.0, 20.0)
+
+    panel.strip.mousePressEvent(_Mouse(panel.strip.width() - 2))
+    panel.strip.mouseReleaseEvent(_Mouse(panel.strip.width() - 2))
+    qapp.processEvents()
+
+    text = panel.caption.text()
+    assert "фрагмент 0:05–0:20" in text, text
+    assert panel._trim == (5.0, 20.0)

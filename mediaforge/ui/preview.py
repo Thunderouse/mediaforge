@@ -64,6 +64,14 @@ class Filmstrip(QWidget):
         self._pos = max(0.0, seconds)
         self.update()
 
+    def trim(self) -> tuple[float, float]:
+        """Текущие ручки в той же форме, что и trimEdited: 0 = «до конца»."""
+        end = self._end if self._end < self._duration else 0.0
+        return self._start, end
+
+    def is_dragging_trim(self) -> bool:
+        return self._drag in ("start", "end")
+
     # ------------------------------------------------------------------ #
     def _x(self, seconds: float) -> float:
         if self._duration <= 0:
@@ -602,7 +610,10 @@ class PreviewPanel(QWidget):
         self.slider.setValue(int(seconds / duration * 1000))
         self.slider.blockSignals(False)
         self.strip.set_position(seconds)
-        self._update_caption()
+        # пока ручку тянут, _trim ещё старый — подпись берёт живые значения
+        # с полоски, иначе до отпускания она врёт про «весь файл»
+        live = self.strip.trim() if self.strip.is_dragging_trim() else None
+        self._update_caption(trim=live)
         self._timer.start()               # кадр перезапрашивается с дебаунсом
 
     def _on_strip_trim(self, start: float, end: float) -> None:
@@ -616,11 +627,12 @@ class PreviewPanel(QWidget):
         self._update_caption()
         self.trimChanged.emit(0.0, 0.0)
 
-    def _update_caption(self, playing: bool = False) -> None:
+    def _update_caption(self, playing: bool = False,
+                        trim: tuple[float, float] | None = None) -> None:
         job = self._job
         if job is None:
             return
-        start, end = self._trim
+        start, end = trim if trim is not None else self._trim
         if job.info.kind not in ("video", "audio"):
             return
         length = (end - start) if end else max(0.0, job.info.duration - start)
