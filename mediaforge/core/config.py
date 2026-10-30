@@ -19,7 +19,7 @@ from .formats import ConvertOptions
 log = logging.getLogger(__name__)
 
 APP_NAME = "MediaForge"
-APP_VERSION = "1.3.4"
+APP_VERSION = "1.3.5"
 
 
 def config_dir() -> Path:
