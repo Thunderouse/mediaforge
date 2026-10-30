@@ -369,8 +369,6 @@ class MainWindow(QMainWindow):
         """Правая колонка: параметры и кнопки живут в OptionsSidebar."""
         self.sidebar = OptionsSidebar(self.settings)
         self.sidebar.optionChanged.connect(self._on_option_changed)
-        self.sidebar.trimEdited.connect(
-            lambda start, end: self._apply_trim(start, end, from_preview=False))
         self.sidebar.useSourceDirChanged.connect(self._on_source_dir_toggled)
         self.sidebar.outDirChanged.connect(self._on_out_dir_changed)
         self.sidebar.convertRequested.connect(self.start_conversion)
@@ -486,15 +484,7 @@ class MainWindow(QMainWindow):
             except OSError:
                 pass
             job = Job(src=f, info=info, target=fm.BY_KEY[target_key])
-            row = JobRow(job, self)
-            row.set_trim(float(self.settings.get("opt_trim_start", 0.0) or 0.0),
-                         float(self.settings.get("opt_trim_end", 0.0) or 0.0))
-            row.activated.connect(self._open_preview_for)
-            row.targetChanged.connect(self._on_row_target)
-            row.removeRequested.connect(self._remove_row)
-            self.list_lay.insertWidget(self.list_lay.count() - 1, row)
-            self.jobs.append(job)
-            self.rows[job.id] = row
+            self._add_job(job)
             added += 1
             self._probe_pending.add(job.id)
             self._probe_futures[job.id] = self._probe_pool.submit(
@@ -615,6 +605,19 @@ class MainWindow(QMainWindow):
         self._after_list_change()
         self._flash(f"Формат применён к {applied} файл(ам)")
 
+    def _add_job(self, job: Job) -> JobRow:
+        """Заводит строку списка для готового Job (без пробы)."""
+        row = JobRow(job, self)
+        # фрагмент у каждого файла свой и начинается с «весь файл»
+        row.set_trim(job.trim_start, job.trim_end)
+        row.activated.connect(self._open_preview_for)
+        row.targetChanged.connect(self._on_row_target)
+        row.removeRequested.connect(self._remove_row)
+        self.list_lay.insertWidget(self.list_lay.count() - 1, row)
+        self.jobs.append(job)
+        self.rows[job.id] = row
+        return row
+
     def _after_list_change(self) -> None:
         n = len(self.jobs)
         self.count_chip.setText(str(n))
@@ -705,20 +708,23 @@ class MainWindow(QMainWindow):
         self.settings.set("out_dir", path)
         self.settings.save()
 
-    def _on_preview_trim(self, start: float, end: float) -> None:
-        """Фрагмент выставлен ручками на полоске кадров."""
-        self._apply_trim(start, end, from_preview=True)
+    def _on_preview_trim(self, job_id: str, start: float, end: float) -> None:
+        """Фрагмент выставлен ручками или полями у выбранного файла."""
+        self._apply_trim(job_id, start, end)
 
-    def _apply_trim(self, start: float, end: float, from_preview: bool) -> None:
-        self.sidebar.apply_trim_state((start, end))
-        self.settings.set("opt_trim_start", start)
-        self.settings.set("opt_trim_end", end)
-        if from_preview:
-            self.sidebar.set_trim_fields(start, end)
-        elif hasattr(self, "preview"):
-            self.preview.apply_trim(start, end)
-        for row in self.rows.values():
-            row.set_trim(start, end)
+    def _apply_trim(self, job_id: str, start: float, end: float) -> None:
+        """Фрагмент — свойство файла: остальные строки и settings не трогаем."""
+        job = next((j for j in self.jobs if j.id == job_id), None)
+        if job is None:
+            return
+        job.trim_start = max(0.0, float(start or 0.0))
+        job.trim_end = max(0.0, float(end or 0.0))
+        row = self.rows.get(job_id)
+        if row is not None:
+            row.set_trim(job.trim_start, job.trim_end)
+        if self.preview.current_job_id() == job_id:
+            self.preview.apply_trim(job.trim_start, job.trim_end)
+        self._update_summary()
 
     def _show_view(self, index: int) -> None:
         self.stack.setCurrentIndex(index)
@@ -749,12 +755,6 @@ class MainWindow(QMainWindow):
             self._flash("ffmpeg не найден — конвертация недоступна")
             return
         if self._is_busy() or not self.jobs:
-            return
-        try:
-            self.sidebar.read_trim()
-        except ValueError as exc:
-            self._flash(str(exc))
-            QMessageBox.warning(self, APP_NAME, str(exc))
             return
         opts = self.settings.options()
         use_source = self.sidebar.use_source_dir

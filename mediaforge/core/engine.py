@@ -34,12 +34,19 @@ class Job:
     message: str = ""
     output: Path | None = None
     elapsed: float = 0.0
+    # фрагмент принадлежит файлу, а не запуску: у каждого job свой
+    trim_start: float = 0.0
+    trim_end: float = 0.0
     # свой флаг: задача может быть снята с очереди, пока движок занят другими
     cancel: threading.Event = field(default_factory=threading.Event, repr=False)
 
     @property
     def name(self) -> str:
         return self.src.name
+
+    @property
+    def has_trim(self) -> bool:
+        return self.trim_start > 0 or self.trim_end > 0
 
 
 EventCB = Callable[[str, Job], None]
@@ -151,8 +158,12 @@ class Engine:
             job.progress = 0.0
             self._emit("start", job)
 
+            # opts копируются на задачу: trim из ConvertOptions — значение для
+            # CLI/API, а в очереди у каждого файла свой фрагмент
+            opts = self.options.copy(trim_start=job.trim_start,
+                                     trim_end=job.trim_end)
             result = convert_file(
-                job.src, job.target, self.options, self.tools, out_dir,
+                job.src, job.target, opts, self.tools, out_dir,
                 info=job.info, on_progress=progress,
                 cancel=_AnyCancel(self._cancel, job.cancel),
                 claimed=self._claimed,

@@ -237,8 +237,8 @@ def _timeline_panel(qapp, monkeypatch, duration: float = 30.0) -> PreviewPanel:
 
 def test_caption_follows_start_handle_while_dragging(qapp, monkeypatch):
     panel = _timeline_panel(qapp, monkeypatch)
-    emitted: list[tuple[float, float]] = []
-    panel.trimChanged.connect(lambda a, b: emitted.append((a, b)))
+    emitted: list[tuple] = []
+    panel.trimChanged.connect(lambda *args: emitted.append(args))
 
     panel.strip.mousePressEvent(_Mouse(2))
     panel.strip.mouseMoveEvent(_Mouse(panel.strip.width() * 0.5))
@@ -256,8 +256,8 @@ def test_caption_follows_start_handle_while_dragging(qapp, monkeypatch):
 
 def test_caption_updates_throughout_drag_and_once_on_release(qapp, monkeypatch):
     panel = _timeline_panel(qapp, monkeypatch)
-    emitted: list[tuple[float, float]] = []
-    panel.trimChanged.connect(lambda a, b: emitted.append((a, b)))
+    emitted: list[tuple[str, float, float]] = []
+    panel.trimChanged.connect(lambda job_id, a, b: emitted.append((job_id, a, b)))
 
     panel.strip.mousePressEvent(_Mouse(2))
     seen: list[str] = []
@@ -270,7 +270,8 @@ def test_caption_updates_throughout_drag_and_once_on_release(qapp, monkeypatch):
     starts = [text.split("фрагмент ")[1].split("–")[0] for text in seen if "фрагмент " in text]
     assert len(set(starts)) > 1, starts            # подпись едет вместе с ручкой
     assert len(emitted) == 1, emitted
-    start, end = emitted[0]
+    job_id, start, end = emitted[0]
+    assert job_id == panel._job.id
     assert start == pytest.approx(panel.strip._start, abs=0.01) and end == 0
     assert start == pytest.approx(19.5, abs=1.5), start
     assert panel._trim[0] == pytest.approx(start) and panel._trim[1] == 0

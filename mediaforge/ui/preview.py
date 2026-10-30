@@ -10,16 +10,16 @@ from pathlib import Path
 from PySide6.QtCore import QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (QColor, QFont, QFontMetrics, QImage, QPainter,
                            QPainterPath, QPen, QPixmap)
-from PySide6.QtWidgets import (QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
-                               QPushButton, QSizePolicy, QSlider, QVBoxLayout,
-                               QWidget)
+from PySide6.QtWidgets import (QHBoxLayout, QLabel, QLineEdit, QListWidget,
+                               QListWidgetItem, QPushButton, QSizePolicy,
+                               QSlider, QVBoxLayout, QWidget)
 
 from ..core import preview as pv
 from ..core.engine import Job
 from ..core.ffmpeg import Tools
-from ..core.timecode import format_timecode
+from ..core.timecode import format_timecode, parse_timecode
 from . import theme
-from .widgets import IconButton
+from .widgets import IconButton, TimecodeValidator
 
 
 class Filmstrip(QWidget):
@@ -292,7 +292,7 @@ class _FramePlayer:
 class PreviewPanel(QWidget):
     """Слева список файлов, справа кадр и ползунки фрагмента."""
 
-    trimChanged = Signal(float, float)
+    trimChanged = Signal(str, float, float)   # job_id, начало, конец
     jobSelected = Signal(str)
     renderReady = Signal(str, dict)
 
@@ -348,6 +348,34 @@ class PreviewPanel(QWidget):
         self.caption = QLabel("")
         self.caption.setObjectName("hint")
         right.addWidget(self.caption)
+
+        # фрагмент редактируется здесь и принадлежит выбранному файлу
+        trim_row = QHBoxLayout()
+        trim_row.setSpacing(10)
+        self.edit_start = QLineEdit()
+        self.edit_end = QLineEdit()
+        self.trim_boxes: list[QWidget] = []
+        for text, edit, placeholder in (("С начала", self.edit_start, "0:00"),
+                                        ("По", self.edit_end, "конец файла")):
+            box = QWidget()
+            col = QVBoxLayout(box)
+            col.setContentsMargins(0, 0, 0, 0)
+            col.setSpacing(3)
+            caption = QLabel(text)
+            caption.setObjectName("hint")
+            col.addWidget(caption)
+            edit.setPlaceholderText(placeholder)
+            edit.setValidator(TimecodeValidator(edit))
+            edit.setClearButtonEnabled(True)
+            edit.setMaximumWidth(120)
+            edit.editingFinished.connect(self._on_fields_edited)
+            col.addWidget(edit)
+            trim_row.addWidget(box)
+            self.trim_boxes.append(box)
+        self.trim_note = QLabel("")
+        self.trim_note.setObjectName("hint")
+        trim_row.addWidget(self.trim_note, 1, Qt.AlignBottom)
+        right.addLayout(trim_row)
 
         controls = QHBoxLayout()
         controls.setSpacing(8)
@@ -493,16 +521,61 @@ class PreviewPanel(QWidget):
         for row in range(self.list.count()):
             item = self.list.item(row)
             if item.data(Qt.UserRole) == job_id:
-                self.list.setCurrentRow(row)
+                if self.list.currentRow() == row:
+                    self._show_job()      # уже выбран: поля всё равно обновляем
+                else:
+                    self.list.setCurrentRow(row)
                 return
 
+    def current_job_id(self) -> str:
+        return self._job.id if self._job else ""
+
     def apply_trim(self, start: float, end: float) -> None:
-        """Внешнее обновление (из сайдбара) без эмита сигнала."""
-        self._trim = (start, end)
+        """Внешнее обновление выбранного файла без эмита сигнала."""
+        self._trim = (start or 0.0, end or 0.0)
         if self._job and self._job.info.duration:
             self.strip.set_duration(self._job.info.duration)
             self.strip.set_trim(start, end)
+        self._sync_fields()
         self._update_caption()
+
+    def _sync_fields(self) -> None:
+        """Поля показывают фрагмент выбранного файла."""
+        enabled = bool(self._job and self._job.info.duration > 0
+                       and self._job.info.kind in ("video", "audio"))
+        start, end = self._trim
+        for edit, value in ((self.edit_start, start), (self.edit_end, end)):
+            edit.blockSignals(True)
+            edit.setText(format_timecode(value) if value else "")
+            edit.setEnabled(enabled)
+            edit.blockSignals(False)
+        self._paint_fields(valid=True)
+        for box in self.trim_boxes:
+            box.setVisible(enabled)
+
+    def _paint_fields(self, valid: bool) -> None:
+        for edit in (self.edit_start, self.edit_end):
+            edit.setStyleSheet("" if valid else
+                               f"border-color: {theme.current()['danger']};")
+        self.trim_note.setText("" if valid else "время не разобрано или конец раньше начала")
+
+    def _on_fields_edited(self) -> None:
+        """Enter или уход из поля: применяем фрагмент только к выбранному файлу."""
+        job = self._job
+        if job is None or not self.current_job_id():
+            return
+        start = parse_timecode(self.edit_start.text()) or 0.0
+        end = parse_timecode(self.edit_end.text()) or 0.0
+        if end and end <= start:
+            self._paint_fields(valid=False)      # значение не меняется
+            return
+        self._paint_fields(valid=True)
+        if (start, end) == self._trim:
+            return
+        self._trim = (start, end)
+        self.strip.set_trim(start, end)
+        self._update_caption()
+        self.trimChanged.emit(job.id, start, end)
 
     # ------------------------------------------------------------------ #
     def _on_list_changed(self, current, previous) -> None:
@@ -536,9 +609,11 @@ class PreviewPanel(QWidget):
             return
 
         if has_timeline:
+            self._trim = (job.trim_start, job.trim_end)
             self.strip.set_duration(info.duration)
             self.strip.set_trim(*self._trim)
             self.strip.set_position(0)
+        self._sync_fields()
 
         # кадры/полоска/волна готовятся в фоне — окно не должно подвисать
         self._token += 1
@@ -617,15 +692,23 @@ class PreviewPanel(QWidget):
         self._timer.start()               # кадр перезапрашивается с дебаунсом
 
     def _on_strip_trim(self, start: float, end: float) -> None:
+        job = self._job
+        if job is None:
+            return
         self._trim = (start, end)
         self._update_caption()
-        self.trimChanged.emit(start, end)
+        self._sync_fields()
+        self.trimChanged.emit(job.id, start, end)
 
     def _reset_trim(self) -> None:
+        job = self._job
+        if job is None:
+            return
         self._trim = (0.0, 0.0)
-        self.strip.set_trim(0.0, self._job.info.duration if self._job else 0.0)
+        self.strip.set_trim(0.0, job.info.duration)
         self._update_caption()
-        self.trimChanged.emit(0.0, 0.0)
+        self._sync_fields()
+        self.trimChanged.emit(job.id, 0.0, 0.0)
 
     def _update_caption(self, playing: bool = False,
                         trim: tuple[float, float] | None = None) -> None:

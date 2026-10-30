@@ -53,6 +53,7 @@ from mediaforge.core.ffmpeg import (
 from mediaforge.core.timecode import format_timecode, parse_timecode
 
 FFMPEG = shutil.which("ffmpeg")
+FFPROBE = shutil.which("ffprobe")
 needs_ffmpeg = pytest.mark.skipif(not FFMPEG, reason="нет ffmpeg в системе")
 
 
@@ -2090,3 +2091,97 @@ def test_flush_during_debounce_leaves_no_tmp(tmp_path, monkeypatch):
     assert leftovers == [], leftovers
     data = json.loads(config_path().read_text(encoding="utf-8"))
     assert data["opt_image_width"] == "1004"
+
+
+# --------------------------------------------------------------------------- #
+# Фрагмент принадлежит файлу, а не запуску
+# --------------------------------------------------------------------------- #
+def test_engine_passes_each_job_trim(monkeypatch, tmp_path):
+    """Два файла с разными фрагментами: convert_file получает разные opts."""
+    seen: dict[str, tuple[float, float]] = {}
+    events: list[str] = []
+
+    def fake_convert(src, target, opts, tools, out_dir, **kwargs):
+        seen[src.name] = (opts.trim_start, opts.trim_end)
+        return ConversionResult(output=tmp_path / f"{src.stem}.mp4")
+
+    monkeypatch.setattr(engine_mod, "convert_file", fake_convert)
+    jobs = _fake_jobs(2, tmp_path)
+    jobs[0].trim_start, jobs[0].trim_end = 1.0, 2.0
+    jobs[1].trim_start, jobs[1].trim_end = 3.0, 4.0
+    options = fm.ConvertOptions(trim_start=9.0, trim_end=9.5)   # как из CLI
+
+    engine = Engine(tools=object(), options=options,
+                    on_event=lambda event, job: events.append(event), max_workers=1)
+    engine.start(jobs, tmp_path)
+    assert _wait_for(lambda: events.count("finished") > 0)
+
+    assert seen == {"clip0.mp4": (1.0, 2.0), "clip1.mp4": (3.0, 4.0)}, seen
+    assert (options.trim_start, options.trim_end) == (9.0, 9.5), \
+        "общие opts не должны меняться"
+    assert events.count("finished") == 1
+    assert all(job.status == STATUS_DONE for job in jobs)
+
+
+@needs_ffmpeg
+def test_conversion_uses_each_job_trim(media, tools, tmp_path):
+    """Реальные выходы: у каждого своя длина, по своему фрагменту."""
+    out = tmp_path / "out"
+    out.mkdir()
+    first = tmp_path / "a.mp4"
+    second = tmp_path / "b.mp4"
+    shutil.copyfile(media["clip"], first)
+    shutil.copyfile(media["clip"], second)
+
+    jobs = [
+        Job(src=first, info=probe(first, tools), target=fm.BY_KEY["mp4"],
+            trim_start=0.0, trim_end=0.5),
+        Job(src=second, info=probe(second, tools), target=fm.BY_KEY["mp4"],
+            trim_start=0.0, trim_end=1.5),
+    ]
+    engine = Engine(tools=tools, options=fm.ConvertOptions(),
+                    on_event=lambda event, job: None, max_workers=1)
+    import threading as _threading
+    done = _threading.Event()
+    engine.on_event = lambda event, job: done.set() if event == "finished" else None
+    engine.start(jobs, out)
+    assert done.wait(120), "движок не закончил"
+    assert all(job.status == STATUS_DONE for job in jobs), [(j.status, j.message) for j in jobs]
+
+    a, b = jobs[0].output, jobs[1].output
+    assert a.name == "a.mp4" and b.name == "b.mp4"
+    first_len = _duration(a)
+    second_len = _duration(b)
+    assert first_len == pytest.approx(0.5, abs=0.2), first_len
+    assert second_len == pytest.approx(1.5, abs=0.25), second_len
+
+
+@needs_ffmpeg
+def test_cli_trim_still_applies_to_all_inputs(media, tools, tmp_path):
+    """CLI без изменений: --start/--end режут все входы одного вызова."""
+    out = tmp_path / "cli"
+    out.mkdir()
+    a = tmp_path / "one.mp4"
+    b = tmp_path / "two.mp4"
+    shutil.copyfile(media["clip"], a)
+    shutil.copyfile(media["clip"], b)
+
+    from mediaforge.cli import main as cli_main
+
+    code = cli_main([str(a), str(b), "--to", "mp4", "--start", "0.5",
+                     "--end", "1.5", "--out", str(out)])
+    assert code == 0
+    one, two = out / "one.mp4", out / "two.mp4"
+    assert one.exists() and two.exists()
+    assert _duration(one) == pytest.approx(1.0, abs=0.25)
+    assert _duration(two) == pytest.approx(1.0, abs=0.25)
+
+
+def _duration(path: Path) -> float:
+    """Длительность файла через ffprobe (для проверок выше)."""
+    result = subprocess.run(
+        [FFPROBE, "-v", "error", "-show_entries", "format=duration",
+         "-of", "default=nw=1:nk=1", str(path)],
+        capture_output=True, text=True, check=True,
+    )
+    return float(result.stdout.strip())

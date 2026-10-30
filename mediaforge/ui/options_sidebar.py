@@ -2,8 +2,8 @@
 
 `OptionsSidebar` ничего не знает ни об очереди файлов, ни о движке: он читает
 начальные значения из `Settings`, отдаёт изменения сигналами и принимает
-несколько «внешних» фактов (видимость блоков, размер первого изображения,
-значения фрагмента из предпросмотра).
+несколько «внешних» фактов (видимость блоков, размер первого изображения).
+Фрагмент сюда не относится: он свой у каждого файла и живёт в предпросмотре.
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ from pathlib import Path
 import re
 
 from PySide6.QtCore import QRegularExpression, Qt, Signal
-from PySide6.QtGui import QRegularExpressionValidator, QValidator
+from PySide6.QtGui import QRegularExpressionValidator
 from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
@@ -30,8 +30,6 @@ from PySide6.QtWidgets import (
 
 from ..core import formats as fm
 from ..core.config import Settings
-from ..core.timecode import format_timecode, parse_timecode
-from . import theme
 from .widgets import CheckBox, Combo, IconButton, Segmented
 
 
@@ -39,32 +37,10 @@ from .widgets import CheckBox, Combo, IconButton, Segmented
 _TC_PREFIX = re.compile(r"^\s*\d{0,3}(?::\d{0,2}){0,2}(?:[.,]\d{0,3})?\s*$")
 
 
-class TimecodeValidator(QValidator):
-    """Пропускает ровно то, что умеет разобрать parse_timecode.
-
-    Acceptable ставим только если разбор уже удался: иначе в поле попадали
-    строки вроде «1:2:3:4», которые валидатор считал допустимыми, а read_trim
-    потом падал с ValueError.
-    """
-
-    def validate(self, text: str, pos: int):  # noqa: N802
-        if not text.strip():
-            return QValidator.Intermediate, text, pos
-        try:
-            parse_timecode(text)
-        except ValueError:
-            if _TC_PREFIX.match(text):
-                # недописанное или «1:75» — пусть дописывает, подсветим ошибку
-                return QValidator.Intermediate, text, pos
-            return QValidator.Invalid, text, pos
-        return QValidator.Acceptable, text, pos
-
-
 class OptionsSidebar(QFrame):
     """Блок параметров: качество, разрешение, изображения, фрагмент, GIF, звук."""
 
     optionChanged = Signal(str, object)   # имя опции без «opt_» → значение
-    trimEdited = Signal(float, float)     # начало, конец (секунды)
     useSourceDirChanged = Signal(bool)
     outDirChanged = Signal(str)
     convertRequested = Signal()
@@ -78,7 +54,6 @@ class OptionsSidebar(QFrame):
         super().__init__(parent)
         self.settings = settings
         self._image_source: tuple[int, int] | None = None
-        self._trim_values: tuple[float, float] | None = (0.0, 0.0)
         self.setObjectName("sidebar")
         self.setFixedWidth(320)
 
@@ -192,30 +167,17 @@ class OptionsSidebar(QFrame):
         lay.addWidget(self.image_box)
 
         # --- фрагмент ---
+        # поля переехали в предпросмотр: фрагмент у каждого файла свой
         self.trim_box = QWidget()
         tl = QVBoxLayout(self.trim_box)
         tl.setContentsMargins(0, 4, 0, 0)
         tl.setSpacing(6)
         tl.addWidget(self._divider())
-        self.trim_title = self._section("Фрагмент · весь файл")
-        tl.addWidget(self.trim_title)
-        trim_row = QHBoxLayout()
-        trim_row.setSpacing(8)
-        timecode_validator = TimecodeValidator(self)
-        for caption, layout_attr, value in (("С начала", "edit_trim_start", opts.trim_start),
-                                           ("По", "edit_trim_end", opts.trim_end)):
-            col = QVBoxLayout()
-            col.setSpacing(4)
-            col.addWidget(self._field_label(caption))
-            edit = QLineEdit(format_timecode(value) if value else "")
-            edit.setValidator(timecode_validator)
-            edit.setPlaceholderText("0:00" if caption == "С начала" else "конец")
-            edit.setClearButtonEnabled(True)
-            edit.textChanged.connect(self._on_trim_edited)
-            col.addWidget(edit)
-            trim_row.addLayout(col, 1)
-            setattr(self, layout_attr, edit)
-        tl.addLayout(trim_row)
+        tl.addWidget(self._section("Фрагмент"))
+        trim_hint = QLabel("задаётся в предпросмотре — для каждого файла свой")
+        trim_hint.setObjectName("hint")
+        trim_hint.setWordWrap(True)
+        tl.addWidget(trim_hint)
         lay.addWidget(self.trim_box)
 
         # --- блок GIF ---
@@ -315,9 +277,6 @@ class OptionsSidebar(QFrame):
         lay.addLayout(row)
         self._sync_out_dir_state()
         self._update_image_widgets()
-        # заголовок фрагмента сразу отражает сохранённые значения и живёт по теме
-        theme.bus.changed.connect(self._paint_trim_state)
-        self.apply_trim_state((opts.trim_start or 0.0, opts.trim_end or 0.0))
 
         lay.addStretch(1)
         scroll.setWidget(inner)
@@ -422,50 +381,6 @@ class OptionsSidebar(QFrame):
     def out_dir_text(self) -> str:
         return self.edit_out.text()
 
-    def read_trim(self) -> tuple[float, float]:
-        """Разбирает поля фрагмента; ValueError — если время некорректно."""
-        start = parse_timecode(self.edit_trim_start.text()) or 0.0
-        end = parse_timecode(self.edit_trim_end.text()) or 0.0
-        if end and end <= start:
-            raise ValueError("Конец фрагмента должен быть больше начала")
-        return start, end
-
-    def set_trim_fields(self, start: float, end: float) -> None:
-        """Записывает фрагмент в поля, не порождая сигналов."""
-        for edit, value in ((self.edit_trim_start, start), (self.edit_trim_end, end)):
-            edit.blockSignals(True)
-            edit.setText(format_timecode(value) if value else "")
-            edit.blockSignals(False)
-
-    def apply_trim_state(self, values: tuple[float, float] | None) -> None:
-        """Запоминает состояние фрагмента и перерисовывает заголовок."""
-        self._trim_values = values
-        self._paint_trim_state()
-
-    def _paint_trim_state(self) -> None:
-        """Оформление заголовка и полей по текущей теме (вызывается и из bus)."""
-        values = self._trim_values
-        danger = theme.current()["danger"]
-        muted = theme.current()["muted"]
-        if values is None:
-            for edit in (self.edit_trim_start, self.edit_trim_end):
-                edit.setStyleSheet(f"border-color: {danger};")
-            self.trim_title.setText("Фрагмент · проверьте время")
-            self.trim_title.setStyleSheet(f"color: {danger};")
-            return
-        for edit in (self.edit_trim_start, self.edit_trim_end):
-            edit.setStyleSheet("")
-        start, end = values
-        if not start and not end:
-            self.trim_title.setText("Фрагмент · весь файл")
-        else:
-            tail = f"по {format_timecode(end)}" if end else "до конца"
-            length = f" · {end - start:.1f} с" if end else ""
-            self.trim_title.setText(
-                f"Фрагмент · {format_timecode(start)} {tail}{length}")
-        self.trim_title.setStyleSheet(
-            f"color: {muted}; font-size: 11px; font-weight: 600;")
-
     def pick_out_dir(self) -> None:
         start = self.edit_out.text() or str(Path.home())
         path = QFileDialog.getExistingDirectory(self, "Папка для результатов", start)
@@ -486,15 +401,6 @@ class OptionsSidebar(QFrame):
         if not checked and not self.edit_out.text():
             self.pick_out_dir()
         self.useSourceDirChanged.emit(bool(checked))
-
-    def _on_trim_edited(self, _text: str = "") -> None:
-        """Пользователь правит поля фрагмента в сайдбаре."""
-        try:
-            start, end = self.read_trim()
-        except ValueError:
-            self.apply_trim_state(None)
-            return
-        self.trimEdited.emit(start, end)
 
     def _image_aspect(self) -> float | None:
         """Пропорции первого изображения в очереди — по ним подгоняем поля."""

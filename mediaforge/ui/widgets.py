@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from pathlib import Path
 
 from PySide6.QtCore import (QPointF, QRectF, QSize, Qt, Signal)
 from PySide6.QtGui import (QColor, QFont, QFontMetrics, QPainter, QPainterPath,
-                           QPen)
+                           QPen, QValidator)
 from PySide6.QtWidgets import (QAbstractButton, QButtonGroup, QComboBox, QFrame,
                                QHBoxLayout, QLabel, QPushButton, QSizePolicy,
                                QVBoxLayout, QWidget)
@@ -16,8 +17,11 @@ from ..core import formats as fm
 from ..core.engine import (STATUS_CANCELLED, STATUS_DONE, STATUS_ERROR,
                            STATUS_RUNNING, Job)
 from ..core.ffmpeg import human_size
-from ..core.timecode import format_timecode
+from ..core.timecode import format_timecode, parse_timecode
 from . import icons, theme
+
+
+_TC_PREFIX = re.compile(r"^\s*\d{0,3}(?::\d{0,2}){0,2}(?:[.,]\d{0,3})?\s*$")
 
 
 # --------------------------------------------------------------------------- #
@@ -99,6 +103,27 @@ class CheckBox(QAbstractButton):
 
 
 # --------------------------------------------------------------------------- #
+class TimecodeValidator(QValidator):
+    """Пропускает ровно то, что умеет разобрать parse_timecode.
+
+    Acceptable ставим только если разбор уже удался: иначе в поле попадали
+    строки вроде «1:2:3:4», которые валидатор считал допустимыми, а read_trim
+    потом падал с ValueError.
+    """
+
+    def validate(self, text: str, pos: int):
+        if not text.strip():
+            return QValidator.Intermediate, text, pos
+        try:
+            parse_timecode(text)
+        except ValueError:
+            if _TC_PREFIX.match(text):
+                # недописанное или «1:75» — пусть дописывает, подсветим ошибку
+                return QValidator.Intermediate, text, pos
+            return QValidator.Invalid, text, pos
+        return QValidator.Acceptable, text, pos
+
+
 class Segmented(QWidget):
     """Компактный переключатель из 2–4 вариантов."""
 
