@@ -310,7 +310,3 @@ class ConvertOptions:
 
     def copy(self, **changes) -> "ConvertOptions":
         return replace(self, **changes)
-
-    @property
-    def has_trim(self) -> bool:
-        return self.trim_start > 0 or self.trim_end > 0

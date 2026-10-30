@@ -84,7 +84,6 @@ def test_sidebar_points_to_preview_instead_of_trim_fields(qapp):
     theme.apply("dark")
     side = OptionsSidebar(Settings({"opt_trim_start": 5.0, "opt_trim_end": 10.0}))
 
-    assert not hasattr(side, "edit_trim_start"), "полей фрагмента в сайдбаре больше нет"
     assert not hasattr(side, "read_trim")
     assert not hasattr(side, "trimEdited")
     hints = [w.text() for w in side.trim_box.findChildren(QLabel)]

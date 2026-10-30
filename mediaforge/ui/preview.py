@@ -52,8 +52,8 @@ class Filmstrip(QWidget):
         self.update()
 
     def set_trim(self, start: float, end: float) -> None:
-        # глобальный фрагмент может быть длиннее конкретного файла — показываем
-        # то, что помещается, чтобы ручки не уезжали за пределы полоски
+        # фрагмент принадлежит конкретному файлу, но полоска бывает короче:
+        # показываем то, что помещается, чтобы ручки не уезжали за её пределы
         duration = self._duration or 1e9
         self._start = min(max(0.0, start), duration)
         self._end = min(end, duration) if end > 0 else duration

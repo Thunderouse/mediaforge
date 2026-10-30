@@ -44,10 +44,6 @@ class Job:
     def name(self) -> str:
         return self.src.name
 
-    @property
-    def has_trim(self) -> bool:
-        return self.trim_start > 0 or self.trim_end > 0
-
 
 EventCB = Callable[[str, Job], None]
 

@@ -46,10 +46,6 @@ class OptionsSidebar(QFrame):
     convertRequested = Signal()
     cancelRequested = Signal()
 
-    # поля фрагмента создаются в цикле, объявляем явно
-    edit_trim_start: QLineEdit
-    edit_trim_end: QLineEdit
-
     def __init__(self, settings: Settings, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.settings = settings
