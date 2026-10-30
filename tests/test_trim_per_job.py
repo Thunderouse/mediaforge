@@ -174,3 +174,52 @@ def test_conversion_uses_each_job_trim(qapp, tmp_path, monkeypatch):
 
     assert seen == {"clip0.mp4": (1.0, 2.0), "clip1.mp4": (3.0, 4.0)}, seen
     assert all(job.status == STATUS_DONE for job in win.jobs)
+
+
+def test_unparsable_time_is_highlighted_instead_of_raising(qapp, tmp_path, monkeypatch):
+    """«1:75» валидатор пускает как Intermediate — слот не должен падать."""
+    win = _window(qapp, tmp_path, monkeypatch)
+    job = win.jobs[0]
+    win.preview.select_job(job.id)
+    qapp.processEvents()
+
+    _set_fields(win, "1:75", "")          # раньше здесь летел ValueError из слота
+
+    assert (job.trim_start, job.trim_end) == (0.0, 0.0)
+    assert theme.current()["danger"] in win.preview.edit_start.styleSheet()
+    assert theme.current()["danger"] in win.preview.edit_end.styleSheet()
+    assert win.preview.trim_note.text(), "подпись должна объяснять ошибку"
+
+
+def test_start_beyond_duration_is_rejected(qapp, tmp_path, monkeypatch):
+    """Начало за концом файла (30 с) не сохраняется."""
+    win = _window(qapp, tmp_path, monkeypatch)
+    job = win.jobs[0]
+    win.preview.select_job(job.id)
+    qapp.processEvents()
+
+    _set_fields(win, "40", "")
+
+    assert (job.trim_start, job.trim_end) == (0.0, 0.0)
+    assert theme.current()["danger"] in win.preview.edit_start.styleSheet()
+    assert "пределами" in win.preview.trim_note.text()
+    assert "✂" not in win.rows[job.id].meta.text()
+
+
+def test_end_beyond_duration_is_clamped_to_file_end(qapp, tmp_path, monkeypatch):
+    """Конец за файлом обрезается до длительности, полоска и подпись согласованы."""
+    win = _window(qapp, tmp_path, monkeypatch)
+    job = win.jobs[0]
+    win.preview.select_job(job.id)
+    qapp.processEvents()
+
+    _set_fields(win, "", "99")
+
+    assert job.trim_end == pytest.approx(30.0)
+    assert job.trim_end <= job.info.duration
+    assert win.preview.strip._end == pytest.approx(30.0)
+    assert win.preview._trim == (0.0, pytest.approx(30.0))
+    caption = win.preview.caption.text()
+    assert "0:30" in caption and "весь файл" not in caption, caption
+    assert win.preview.edit_end.text() == "0:30", "поле показывает принятое значение"
+    assert win.preview.trim_note.text() == ""

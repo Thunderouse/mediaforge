@@ -553,28 +553,55 @@ class PreviewPanel(QWidget):
         for box in self.trim_boxes:
             box.setVisible(enabled)
 
-    def _paint_fields(self, valid: bool) -> None:
+    def _paint_fields(self, valid: bool, reason: str = "") -> None:
         for edit in (self.edit_start, self.edit_end):
             edit.setStyleSheet("" if valid else
                                f"border-color: {theme.current()['danger']};")
-        self.trim_note.setText("" if valid else "время не разобрано или конец раньше начала")
+        if valid:
+            self.trim_note.setText("")
+        else:
+            self.trim_note.setText(reason or "время не разобрано или конец раньше начала")
 
     def _on_fields_edited(self) -> None:
-        """Enter или уход из поля: применяем фрагмент только к выбранному файлу."""
+        """Enter или уход из поля: применяем фрагмент только к выбранному файлу.
+
+        Валидатор намеренно пропускает недописанное («1:75»), чтобы можно было
+        допечатать, — поэтому разбор здесь терпимый: любая ошибка только
+        подсвечивает поля и не трогает job.
+        """
         job = self._job
         if job is None or not self.current_job_id():
             return
-        start = parse_timecode(self.edit_start.text()) or 0.0
-        end = parse_timecode(self.edit_end.text()) or 0.0
-        if end and end <= start:
-            self._paint_fields(valid=False)      # значение не меняется
+        try:
+            start = parse_timecode(self.edit_start.text()) or 0.0
+            end = parse_timecode(self.edit_end.text()) or 0.0
+        except ValueError:
+            self._paint_fields(valid=False, reason="время не разобрано: нужен 1:30 или 90")
             return
-        self._paint_fields(valid=True)
+
+        duration = job.info.duration or 0.0
+        if duration > 0:
+            if start >= duration:
+                self._paint_fields(
+                    valid=False,
+                    reason=f"начало за пределами файла ({format_timecode(duration)})")
+                return
+            if end > duration:
+                end = duration          # конец за файлом — значит «до конца файла»
+        if end and end <= start:
+            self._paint_fields(valid=False, reason="конец должен быть больше начала")
+            return
+
         if (start, end) == self._trim:
+            # значение не изменилось, но текст стоит нормализовать: «60» -> «1:00»
+            self._paint_fields(valid=True)
+            self._sync_fields()
             return
         self._trim = (start, end)
         self.strip.set_trim(start, end)
         self._update_caption()
+        self._paint_fields(valid=True)
+        self._sync_fields()             # поля показывают то, что реально принято
         self.trimChanged.emit(job.id, start, end)
 
     # ------------------------------------------------------------------ #
